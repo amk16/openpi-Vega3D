@@ -93,6 +93,10 @@ class Observation(Generic[ArrayT]):
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
+    # Visibility mask for proprioception dropout (optional).
+    proprio_visibility_mask: at.Float[ArrayT, "*b s"] | None = None
+    # Task ID for task-conditioned models (optional).
+    task_id: at.Int[ArrayT, "*b"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -122,6 +126,8 @@ class Observation(Generic[ArrayT]):
             images=data["image"],
             image_masks=data["image_mask"],
             state=data["state"],
+            proprio_visibility_mask=data.get("proprio_visibility_mask"),
+            task_id=data.get("task_id"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),

@@ -34,6 +34,29 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # B1K loss weighting (training only, safe to ignore at inference)
+    loss_weighting_strategy: str = "per_group"
+    action_groups: dict[str, tuple[int, int]] | None = None
+    group_weights: dict[str, float] | None = None
+    proprio_dropout_dropout_whole_proprio_pct: float = 0.0
+
+    # Task conditioning: task embeddings added to flow-matching time conditioning
+    num_tasks: int = 0
+    task_embedding_scale: float = 1.0
+
+    # VEGA-3D Adaptive Gated Fusion (Phase 3; paper Eqs. 6-8)
+    # When use_vega3d=True, base-camera image tokens are replaced by a gated fusion
+    # of generative tower features (P_gen(tower(img))) and PaliGemma's own image
+    # tokens (P_sem(sem_tokens)). Grid is set to 16x16 to match PaliGemma's native
+    # 256-token layout; tower output_spatial is auto-injected as 16 if unspecified.
+    use_vega3d: bool = False
+    vega3d_tower_name: str = "vae"  # "vae" | "wan_t2v"
+    vega3d_tower_kwargs: dict | None = None
+    vega3d_cameras: tuple[str, ...] = ("base_0_rgb",)
+    # Runtime ablation: force fusion gate to fixed value in [0, 1] (None = learned).
+    # 0.0 -> pure generative; 1.0 -> pure semantic.
+    vega3d_force_gate: float | None = None
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)

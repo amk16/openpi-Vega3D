@@ -86,6 +86,8 @@ class PI0Pytorch(nn.Module):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
+        self.num_tasks = getattr(config, "num_tasks", 0)
+        self.task_embedding_scale = getattr(config, "task_embedding_scale", 1.0)
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -108,6 +110,40 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        if self.num_tasks > 0:
+            logging.info(f"Task embeddings enabled: {self.num_tasks} tasks, scale={self.task_embedding_scale}")
+            self.task_embeddings = nn.Embedding(self.num_tasks, action_expert_config.width)
+
+        # VEGA-3D Adaptive Gated Fusion (paper Eqs. 6-8)
+        self.use_vega3d = getattr(config, "use_vega3d", False)
+        if self.use_vega3d:
+            from openpi.models_pytorch.adaptive_gated_fusion import AdaptiveGatedFusion
+            from openpi_vega3d.towers import TOWER_REGISTRY
+
+            # output_spatial is injected to 16 by load_b1k_policy so the tower's
+            # 16x16 grid matches PaliGemma's native 256-token SigLIP layout.
+            tower_kwargs = dict(config.vega3d_tower_kwargs or {})
+            self.spatial_tower = TOWER_REGISTRY[config.vega3d_tower_name](**tower_kwargs)
+            feat_dim = self.spatial_tower.feat_dim
+
+            hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
+            self.P_gen = nn.Linear(feat_dim, hidden)
+            self.P_sem = nn.Linear(hidden, hidden)
+            self.fusion = AdaptiveGatedFusion(hidden, force_gate=config.vega3d_force_gate)
+            self._spatial_cameras = tuple(config.vega3d_cameras)
+
+            logging.info(
+                "VEGA-3D fusion enabled: tower=%s (feat_dim=%d), cameras=%s, gate=%s",
+                config.vega3d_tower_name, feat_dim, self._spatial_cameras,
+                "learned" if config.vega3d_force_gate is None else f"forced={config.vega3d_force_gate}",
+            )
+        else:
+            self.spatial_tower = None
+            self.P_gen = None
+            self.P_sem = None
+            self.fusion = None
+            self._spatial_cameras = ()
+
         torch.set_float32_matmul_precision("high")
         if config.pytorch_compile_mode is not None:
             self.sample_actions = torch.compile(self.sample_actions, mode=config.pytorch_compile_mode)
@@ -115,7 +151,7 @@ class PI0Pytorch(nn.Module):
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
-        msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
+        msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.10/site-packages/transformers/`."
         try:
             from transformers.models.siglip import check
 
@@ -168,6 +204,9 @@ class PI0Pytorch(nn.Module):
             observation.tokenized_prompt,
             observation.tokenized_prompt_mask,
             observation.state,
+            getattr(observation, "proprio_visibility_mask", None),
+            getattr(observation, "task_id", None),
+            list(observation.images.keys()),  # image_names, for VEGA-3D camera lookup
         )
 
     def sample_noise(self, shape, device):
@@ -184,23 +223,54 @@ class PI0Pytorch(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=torch.float32, device=device)
 
+    def _fuse_camera(self, raw_image: torch.Tensor, semantic_tokens: torch.Tensor) -> torch.Tensor:
+        """Apply VEGA-3D Adaptive Gated Fusion for one camera stream.
+
+        Args:
+            raw_image: [B, 3, H, W] RGB frame fed to the tower.
+            semantic_tokens: [B, N, D_llm] PaliGemma image tokens for this camera.
+
+        Returns:
+            [B, N, D_llm] fused tokens (same shape as semantic_tokens).
+        """
+        # Tower encode runs under its own inference_mode + autocast; the output
+        # can be bf16 while P_gen / P_sem / fusion live in fp32 at init. Align
+        # dtypes to semantic_tokens so the convex combination stays consistent.
+        gen_feats = self.spatial_tower.encode(raw_image)
+        gen_feats = gen_feats.to(dtype=semantic_tokens.dtype)
+
+        F_gen = self.P_gen(gen_feats)                 # [B, N, D_llm]
+        F_sem = self.P_sem(semantic_tokens)           # [B, N, D_llm]
+        return self.fusion(F_gen, F_sem)
+
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks
+        self, images, img_masks, lang_tokens, lang_masks, image_names=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for PaliGemma transformer processing.
+
+        When VEGA-3D is active and image_names is provided, any camera listed in
+        self._spatial_cameras has its PaliGemma tokens replaced by the adaptive
+        gated fusion of P_gen(tower(img)) and P_sem(sem_tokens).
         """
         embs = []
         pad_masks = []
         att_masks = []
 
+        if image_names is None:
+            image_names = [None] * len(images)
+
         # Process images
-        for img, img_mask in zip(images, img_masks, strict=True):
+        for cam_name, img, img_mask in zip(image_names, images, img_masks, strict=True):
 
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
 
             img_emb = self._apply_checkpoint(image_embed_func, img)
+
+            # VEGA-3D: fuse spatial tower features into this stream if configured.
+            if self.spatial_tower is not None and cam_name in self._spatial_cameras:
+                img_emb = self._fuse_camera(img, img_emb)
 
             bsize, num_img_embs = img_emb.shape[:2]
 
@@ -235,7 +305,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, state, noisy_actions, timestep):
+    def embed_suffix(self, state, noisy_actions, timestep, proprio_visibility_mask=None, task_id=None):
         """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
         embs = []
         pad_masks = []
@@ -266,6 +336,14 @@ class PI0Pytorch(nn.Module):
             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
         )
         time_emb = time_emb.type(dtype=timestep.dtype)
+
+        if self.num_tasks > 0:
+            if task_id is None:
+                raise ValueError("Task ID is required for task embeddings")
+            if task_id >= self.num_tasks:
+                raise ValueError(f"task_id={task_id} is out of range for num_tasks={self.num_tasks}")
+            task_emb = self.task_embeddings(task_id)
+            time_emb = time_emb + self.task_embedding_scale * task_emb
 
         # Fuse timestep + action information using an MLP
         def action_proj_func(noisy_actions):
@@ -314,9 +392,9 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, return_per_dim=False) -> Tensor | tuple[Tensor, Tensor]:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names = self._preprocess_observation(observation, train=True)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -328,8 +406,8 @@ class PI0Pytorch(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time, proprio_visibility_mask, task_id)
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
@@ -381,9 +459,9 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names = self._preprocess_observation(observation, train=False)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
@@ -412,6 +490,8 @@ class PI0Pytorch(nn.Module):
                 past_key_values,
                 x_t,
                 expanded_time,
+                proprio_visibility_mask,
+                task_id,
             )
 
             # Euler step - use new tensor assignment instead of in-place operation
@@ -426,9 +506,11 @@ class PI0Pytorch(nn.Module):
         past_key_values,
         x_t,
         timestep,
+        proprio_visibility_mask=None,
+        task_id=None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep, proprio_visibility_mask, task_id)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]

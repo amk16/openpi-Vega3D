@@ -325,6 +325,16 @@ class PromptFromLeRobotTask(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class ExtractTaskID(DataTransformFn):
+    """Extracts task_id from task_index for task embeddings."""
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "task_index" in data:
+            return {**data, "task_id": np.int32(data["task_index"])}
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 

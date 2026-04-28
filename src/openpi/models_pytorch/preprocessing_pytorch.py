@@ -166,6 +166,8 @@ def preprocess_observation_pytorch(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        proprio_visibility_mask=getattr(observation, "proprio_visibility_mask", None),
+        task_id=getattr(observation, "task_id", None),
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
