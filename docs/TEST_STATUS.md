@@ -5,6 +5,37 @@ Newest phase appears first.
 
 ---
 
+## Phase 4: Adapter Training
+
+### Sub-Phase 4.1 — Data config + TrainConfig (2026-05-04)
+
+**Goal**: Port `LeRobotB1KDataConfig` and create `pi05_b1k_vega3d` TrainConfig entry.
+
+**Environment**: Python 3.10, openpi-Vega3D venv, same as Phase 3.
+
+### Completed Tests (4)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Config parse (`get_config('pi05_b1k_vega3d')`) | Config entry exists, all fields resolve, model_type=PI05, use_vega3d=True, cameras=("base_0_rgb",), force_gate=None | **PASS** |
+| Data factory (`config.data.create(...)`) | `LeRobotB1KDataConfig` produces valid `DataConfig` with RepackTransform, B1kInputs/B1kOutputs, 4 model transforms, use_quantile_norm=True, 22 tasks, 190 episodes | **PASS** |
+| No regressions (all 32 configs) | All existing configs parse, names unique, no import errors | **PASS** |
+| Checkpoint path exists | `/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor` on disk | **PASS** |
+
+### Follow-ups (pending Sub-Phases 4.3–4.8)
+
+| Item | Notes |
+|------|--------|
+| Adapter param count assertion | Sub-phase 4.3 — filter optimizer to only `P_gen`, `P_sem`, `fusion.*`; assert ~4M trainable. |
+| Gate stats logging | Sub-phase 4.3 — log `g_mean`, `g_std`, histogram per step during training. |
+| `to_unit_range` compile fix | Sub-phase 4.4 — remove `.item()` call; verify torch.compile runs clean. |
+| Spatial dropout | Sub-phase 4.5 — `dropout_p=0.1` in training mode; unit test. |
+| Smoke training run (500 steps) | Sub-phase 4.6 — loss decreases, gate spreads, no OOM. **Requires data.** |
+| Convergence training | Sub-phase 4.7 — 10K-50K steps, val loss below baseline. **Requires data.** |
+| Evaluation (300 rollouts) | Sub-phase 4.8 — 5 tasks × 20 rollouts × 3 methods. **Requires data + trained checkpoint.** |
+
+---
+
 ## Phase 3: Adaptive Gated Fusion Integration (2026-04-20)
 
 **Goal**: Wire VEGA-3D generative towers into the policy via Adaptive Gated Fusion (paper Eqs. 6-8). Inference-only scope.

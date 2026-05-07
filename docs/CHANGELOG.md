@@ -5,6 +5,53 @@ Newest phase appears first.
 
 ---
 
+## Phase 4: Adapter Training (2026-05-04)
+
+**Goal**: Train the VEGA-3D fusion adapters (`P_gen`, `P_sem`, `fusion.*`) on B1K demonstration data so the gated fusion produces actionable improvements over the frozen baseline.
+
+### Sub-Phase 4.1 — Data config + TrainConfig (2026-05-04)
+
+**Goal**: Port `LeRobotB1KDataConfig` from upstream openpi and create a `pi05_b1k_vega3d` TrainConfig entry so the training script can be launched.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi/training/config.py` | Added `import os` and `import b1k_policy`. Added 13 fields to `DataConfig` (tasks, episodes_index, behavior_dataset_root, prompt_from_skill_annotations, boundary_oversampling, proprio_dropout, etc.). Added 5 validation fields to `TrainConfig` (val_log_interval, val_batch_size, val_num_batches, val_repo_id, val_episodes_index). Added `LeRobotB1KDataConfig` factory class (~40 lines). Added `pi05_b1k_vega3d` TrainConfig entry (~90 lines). |
+
+### Key Decisions and Reasoning
+
+1. **Learning rate = 1e-4 (20× upstream's 5e-6).** Standard adapter-only heuristic: `base_lr × sqrt(total_params / adapter_params) ≈ 5e-6 × sqrt(3.5B / 4M) ≈ 1.5e-4`. Rounded conservatively to `1e-4`.
+
+2. **Batch size = 8 (vs upstream's 32).** Single 48GB GPU constraint. ~20GB for model + tower + optimizer state, ~12GB for activations at batch 8. Headroom preserved for spikes.
+
+3. **50,000 steps (vs upstream's 261,000).** Adapter-only training converges far faster — fewer parameters, cleaner gradients. If 50K isn't enough, extending is trivial (just change `num_train_steps` and `decay_steps`).
+
+4. **`behavior_dataset_root=None` (placeholder).** User provides data later; path will be filled in before 4.6 smoke run. All other config is data-independent and validated.
+
+5. **Same 22 tasks as upstream `pi05_b1k`.** Ensures results are directly comparable to the baseline checkpoint. Not choosing a subset of tasks avoids biasing results toward "easy" tasks.
+
+6. **Copied upstream boundary_oversampling_factor=2, boundary_window_frames=30.** Skill-boundary oversampling is validated upstream as producing better multi-step transitions. Not changing it for our adapter run avoids confounding variables.
+
+### Validation
+
+```
+python -c "from openpi.training.config import get_config; get_config('pi05_b1k_vega3d')"
+  → Config parses, model_type=PI05, use_vega3d=True, 22 tasks, 190 episodes
+
+python -c "config.data.create(...)"
+  → LeRobotB1KDataConfig factory produces DataConfig with:
+    - RepackTransform (7 key mappings)
+    - B1kInputs + B1kOutputs
+    - 4 model transforms (InjectDefaultPrompt, ResizeImages, TokenizePrompt, PadStatesAndActions)
+    - use_quantile_norm=True, action_sequence_keys=("action",)
+
+All 32 existing configs still parse. No regressions.
+Checkpoint path exists on disk.
+```
+
+---
+
 ## Phase 3: Adaptive Gated Fusion Integration (2026-04-20)
 
 **Goal**: Wire the VEGA-3D generative towers (VAE, WAN) into the policy's prefix token stream using the Adaptive Gated Fusion mechanism from the VEGA-3D paper (arXiv:2603.19235, Eqs. 6-8). Scope is inference-only — training-time dropout, gradient flow validation, and usefulness measurements are deferred to Phase 4.

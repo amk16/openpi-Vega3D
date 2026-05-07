@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import dataclasses
 import difflib
 import logging
+import os
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -18,6 +19,7 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.b1k_policy as b1k_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
@@ -87,15 +89,49 @@ class DataConfig:
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
 
+    # Tasks to use for the dataset. If None, all tasks are included.
+    tasks: Sequence[str] | None = None
+
+    # If true, will prefer the prompt from the data if it is present.
+    prefer_prompt_from_data: bool = False
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # If true, will use on-disk skill annotations to define the prompt.
+    prompt_from_skill_annotations: bool = False
+    # Percentage of time to use the base prompt instead of skill annotated prompt.
+    prompt_from_skill_annotations_use_base_prompt_pct: float = 0.0
+    # Root directory containing "annotations/..." for skill annotation lookup.
+    skill_annotations_dir: str | None = None
+    # Candidate JSON keys to pull the annotation text from.
+    skill_annotation_keys: Sequence[str] = ("skill", "skill_name", "language_instruction", "annotation", "description")
+
+    # Percentage of time to zero out the entire proprioception vector during training.
+    proprio_dropout_dropout_whole_proprio_pct: float = 0.0
+    proprio_dropout_proprio_groups: Sequence[tuple[Sequence[int], float]] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
+
+    # Root directory for B1K demo data on disk.
+    behavior_dataset_root: str | None = None
+
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+    # Path to the data filter file for DROID dataset.
+    filter_dict_path: str | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+
+    # Episode indices to use for training. If None, all episodes are used.
+    episodes_index: list[int] | None = None
+
+    # Skill descriptions to resample with weights.
+    resampled_skill_descriptions: dict[str, float] | None = None
+
+    # Multiplier to oversample timesteps near episode boundaries.
+    boundary_oversampling_factor: int = 1
+    # Window in frames around a boundary that counts as "near the boundary".
+    boundary_window_frames: int = 0
 
 
 class GroupFactory(Protocol):
@@ -463,6 +499,51 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotB1KDataConfig(DataConfigFactory):
+    """Factory that wires B1K-specific transforms into the data pipeline.
+
+    Turns raw LeRobot B1K demo data into the format B1kInputs expects:
+    camera images -> uint8 HWC, state -> 23-dim from 256-dim proprio, task_index -> task_id.
+    """
+
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/egocentric_camera": "observation.images.rgb.head",
+                        "observation/wrist_image_left": "observation.images.rgb.left_wrist",
+                        "observation/wrist_image_right": "observation.images.rgb.right_wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "task_index": "task_index",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[b1k_policy.B1kInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[b1k_policy.B1kOutputs(action_dim=23)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            use_quantile_norm=True,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -533,6 +614,16 @@ class TrainConfig:
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
+
+    # How often (in steps) to log validation metrics.
+    val_log_interval: int = 100
+    # Validation batch size (optional, defaults to batch_size if not set).
+    val_batch_size: int | None = None
+    # Number of validation batches to average for validation loss.
+    val_num_batches: int = 10
+    # Optionally, repo_id for validation set (if different from train).
+    val_repo_id: str | None = None
+    val_episodes_index: list[int] | None = None
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -929,6 +1020,106 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # B1K + VEGA-3D adapter training config.
+    #
+    TrainConfig(
+        name="pi05_b1k_vega3d",
+        exp_name="openpi",
+        project_name="B1K-VEGA3D",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=128,
+            paligemma_variant="gemma_2b_lora_32",
+            loss_weighting_strategy="per_group",
+            action_groups={
+                "base": (0, 3),
+                "trunk": (3, 7),
+                "left_arm": (7, 14),
+                "left_gripper": (14, 15),
+                "right_arm": (15, 22),
+                "right_gripper": (22, 23),
+                "padding": (23, 32),
+            },
+            group_weights={
+                "base": 1.0,
+                "trunk": 1.7,
+                "left_arm": 2.0,
+                "left_gripper": 2.0,
+                "right_arm": 2.0,
+                "right_gripper": 2.0,
+                "padding": 0.0,
+            },
+            proprio_dropout_dropout_whole_proprio_pct=0.2,
+            num_tasks=50,
+            task_embedding_scale=1.5,
+            use_vega3d=True,
+            vega3d_tower_name="vae",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "ckpts/stable-diffusion-2-1-base",
+            },
+            vega3d_cameras=("base_0_rgb",),
+            vega3d_force_gate=None,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos",
+            base_config=DataConfig(
+                tasks=[
+                    "assembling_gift_baskets",
+                    "bringing_in_wood",
+                    "carrying_in_groceries",
+                    "chop_an_onion",
+                    "chopping_wood",
+                    "clean_a_patio",
+                    "cleaning_up_plates_and_food",
+                    "clearing_food_from_table_into_fridge",
+                    "hanging_pictures",
+                    "hiding_Easter_eggs",
+                    "loading_the_car",
+                    "make_microwave_popcorn",
+                    "make_pizza",
+                    "moving_boxes_to_storage",
+                    "picking_up_trash",
+                    "putting_away_Halloween_decorations",
+                    "putting_shoes_on_rack",
+                    "rearranging_kitchen_furniture",
+                    "setting_the_fire",
+                    "spraying_for_bugs",
+                    "spraying_fruit_trees",
+                    "turning_on_radio",
+                ],
+                prompt_from_task=False,
+                prompt_from_skill_annotations=True,
+                prompt_from_skill_annotations_use_base_prompt_pct=0.7,
+                proprio_dropout_dropout_whole_proprio_pct=0.1,
+                episodes_index=list(range(190)),
+                boundary_oversampling_factor=2,
+                boundary_window_frames=30,
+                behavior_dataset_root=None,
+            ),
+        ),
+        pytorch_weight_path="/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=128,
+            paligemma_variant="gemma_2b_lora_32",
+        ).get_freeze_filter(),
+        num_train_steps=50_000,
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=50_000,
+            decay_lr=1e-6,
+        ),
+        ema_decay=None,
+        val_log_interval=2500,
+        val_repo_id="behavior-1k/2025-challenge-demos",
+        val_episodes_index=list(range(190, 200)),
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+        num_workers=min(32, os.cpu_count() - 2),
     ),
     #
     # Debugging configs.
