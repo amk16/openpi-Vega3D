@@ -19,3 +19,5 @@ RUN echo "alias nvidia-smi='watch -n 1 nvidia-smi'" >> /root/.bashrc && \
 # Onstart script — point Vast.ai template to: bash /opt/scripts/onstart.sh
 COPY onstart.sh /opt/scripts/onstart.sh
 RUN chmod +x /opt/scripts/onstart.sh
+
+RUN touch ~/.no_auto_tmux
