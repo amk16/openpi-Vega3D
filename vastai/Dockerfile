@@ -10,7 +10,7 @@ RUN git clone https://github.com/amk16/openpi-Vega3D
 # Install dependencies
 WORKDIR /opt/workspace-internal/openpi-Vega3D
 RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv sync
-RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv pip install --system -e .
 
 # Custom aliases
 RUN echo "alias nvidia-smi='watch -n 1 nvidia-smi'" >> /root/.bashrc && \

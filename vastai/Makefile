@@ -1,4 +1,4 @@
-IMAGE := sshahid1/vast-openpi-vega
+IMAGE := shahids1/vast-openpi-vega
 TAG := latest
 
 .PHONY: build build-mac run sh push pull logs exec stop clean
