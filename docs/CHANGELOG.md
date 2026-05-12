@@ -5,6 +5,144 @@ Newest phase appears first.
 
 ---
 
+## Phase 6: DreamDojo as Third Generative-Tower Backbone (2026-05-12)
+
+**Goal**: Register DreamDojo (backed by NVIDIA's Cosmos-Predict2.5-2B-teacher) as a third backbone in TOWER_REGISTRY alongside "vae" and "wan_t2v". Infrastructure-only — adapter training is Phase 7.
+
+### Sub-Phase 6.2 — Real Loader + feat_dim Introspection (2026-05-12)
+
+**Goal**: Replace scaffold with real DreamDojo/Cosmos-Predict2.5-2B model loading. Introspect `feat_dim` from loaded model config. `encode()` still returns dummy zeros — real forward in 6.3.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | Replaced scaffold with real loader. Added `_load_transformer()` using diffusers `CosmosTransformer3DModel` + built-in key conversion. Added `_find_checkpoint()` for flexible .pt discovery. Offline mode (no checkpoint) falls back to config-based feat_dim. ~165 lines. |
+
+### Key Decisions and Reasoning
+
+1. **Revised Decision 1: Use DreamDojo 2B pretrain checkpoint** (changed from base Cosmos). DreamDojo's 44k hours of egocentric video gives robotics-relevant features. Same Cosmos-Predict2.5 architecture; extra action-conditioning keys (`action_embedder_B_3D`, `action_embedder_B_D`) skipped via `strict=False`.
+
+2. **Manual architecture + key conversion over `from_single_file`.** Instantiate `CosmosTransformer3DModel` with explicit 2B config, then apply diffusers' `convert_cosmos_transformer_checkpoint_to_diffusers()` for key mapping. More robust than `from_single_file` which requires fetching config from HuggingFace repos that may need auth.
+
+3. **in_channels=17 (not 16).** DreamDojo adds 1 action channel on top of 16 VAE latent channels. With `concat_padding_mask=True`, total patchify input = 18 channels, matching DreamDojo's `x_embedder.proj.1.weight` shape of `(2048, 72)`.
+
+4. **Confirmed: hidden_size = 2048 (16 heads × 128 dim), 28 blocks, 1.96B params.** Verified via DCP metadata from `nvidia/DreamDojo` on HuggingFace + diffusers `CosmosTransformer3DModel` instantiation.
+
+5. **Offline mode for testing.** When no checkpoint exists, tower sets `transformer=None` and uses config-based feat_dim (2048). All 6.1 tests pass in offline mode. Online loading tested with synthetic round-trip checkpoint.
+
+### Validation
+
+```
+9 tests PASS: 6.1 regressions (registry, instantiation, shape, student rejection)
+  + 6.2 new (feat_dim introspection, consistency, freeze, block count, block_idx validation).
+Online loader tested with synthetic checkpoint (570 keys matched, action keys skipped).
+All 32 TrainConfigs parse: no regressions.
+```
+
+---
+
+### Sub-Phase 6.1 — Skeleton DreamDojoTower Scaffold (2026-05-12)
+
+**Goal**: Create placeholder `DreamDojoTower(BaseTower)` returning dummy zeros, register it in TOWER_REGISTRY. No real model loading.
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | `DreamDojoTower(BaseTower)` scaffold (~80 lines). Constructor stores config, `encode()` returns zeros of shape `[B, 256, 2048]`, `feat_dim` returns placeholder 2048. Student variant refused with `NotImplementedError`. |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/__init__.py` | Added `"dreamdojo": ("openpi_vega3d.towers.dreamdojo_tower", "DreamDojoTower")` to `_TOWER_MAP` (1 line). |
+
+### Key Decisions and Reasoning
+
+1. **Placeholder feat_dim=2048.** Investigation suggests 2048 for the 2B model (patch_embed projects to 2048 per Medium article analysis), but sub-phase 6.2 must introspect the actual value via `transformer.config`. Using 2048 now lets downstream code (P_gen, tests) reference a concrete number.
+
+2. **Constructor params mirror WAN tower's style** but with DreamDojo-specific args: `variant` (teacher/student), `input_resolution` (256, corrected from plan's 448), `feat_block_idx` (20, i.e. round(0.7 × 28 blocks)).
+
+3. **No `action_regime` parameter.** Investigation confirmed base Cosmos-Predict2.5 has no action input, so the parameter from the original plan is unnecessary. Can add later if Phase 7 uses DreamDojo's specialized checkpoint.
+
+### Validation
+
+```
+7 inline tests PASS: registry keys, instantiation, encode shape, batch size,
+  student rejection, feat_dim, check_output diagnostics.
+scripts/test_tower.py --offline: ALL PASSED (syntax 19/19, ABC contract, registry, diagnostics).
+All 32 TrainConfigs parse: no regressions.
+```
+
+---
+
+### Sub-Phase 6.0 — Investigation & Locked Decisions (2026-05-12)
+
+**Goal**: Investigate Cosmos-Predict2.5-2B architecture, identify blockers, lock design decisions before writing any tower code. Mirrors Phase 4.0's role.
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `docs/PHASE6_INVESTIGATION.md` | Ground truth document: architectural delta vs WAN, 5 blockers with file:line references, 3 locked decisions with reasoning, dependency graph, open questions/risks |
+
+### Key Decisions and Reasoning
+
+1. **Use base Cosmos-Predict2.5-2B, NOT DreamDojo's specialized checkpoint.** Base model is available via standard diffusers API — reliable loading path. DreamDojo's action-conditioned variant may use a non-standard loader. Phase 6 is about proving the backbone slots in; feature quality is Phase 7.
+
+2. **Action regime simplified to "no action input."** Base Cosmos-Predict2.5 has no action argument in its `forward()` — the plan's original "zero 32-d × 4-stacked action tensor" was designed for DreamDojo's specialized model. This is cleaner.
+
+3. **CRITICAL CORRECTION: input_resolution = 256, not 448.** Cosmos uses 8x spatial VAE + 2x2 patchify = 16x total stride. At 448: 448/16 = 28x28 = 784 tokens (not 14x14 as plan assumed). At 256: 256/16 = 16x16 = 256 tokens — exact PaliGemma match with no pooling.
+
+4. **Block attribute confirmed: `transformer_blocks` (not `blocks`).** Cosmos diffusers source uses `self.transformer_blocks` (ModuleList of CosmosTransformerBlock). WAN uses `self.model.blocks`. Hook registration path differs.
+
+5. **feat_block_idx = 20 (round(0.7 × 28 blocks)).** VEGA-3D paper recommends ~70% fractional depth. WAN defaults to -1 (last block) — a discrepancy worth noting but outside Phase 6 scope to fix.
+
+### Validation
+
+```
+PHASE6_INVESTIGATION.md renders cleanly (287 lines).
+All 5 blockers have file:line references to existing code.
+All 3 locked decisions cite sources (diffusers docs, Cosmos tokenizer repo, model card).
+Dependency graph is acyclic.
+3 corrections to PHASE6_PLAN.md applied (spatial math, action regime, block attribute).
+```
+
+---
+
+### Phase 6 Planning — Plan committed (2026-05-12)
+
+**Goal**: Write and commit `docs/PHASE6_PLAN.md` with full sub-phase breakdown (6.0-6.8), locked decisions, dependency graph, risk analysis, and effort estimate.
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `docs/PHASE6_PLAN.md` | Full Phase 6 implementation plan with 9 sub-phases, test tables, risk analysis |
+
+### Key Decisions and Reasoning
+
+1. **Phase 6 = infrastructure, Phase 7 = training.** Mirrors the Phase 0-3 (infra) / Phase 4 (training) split for VAE. Keeps each phase focused and independently verifiable.
+
+2. **Cosmos-Predict2.5-2B teacher variant only.** The 4-step distilled student does not support intermediate-noise extraction needed for feature hooks. Student variant explicitly refused at construction time.
+
+3. **Null action regime (Regime A) for v1.** Zero 32-d x 4-stacked action tensor at AdaLN slot. Passive geometric-prior extraction isolates the data-distribution effect from the action-conditioning effect.
+
+4. **2x input resolution for spatial-grid alignment.** Feed 448x448 so Cosmos's VAE compression yields ~14x14 latent grid, then pool to 16x16 = 256 tokens matching PaliGemma's native SigLIP grid. Keeps `_fuse_camera` untouched.
+
+5. **Support both base and wrist camera configs.** `pi05_b1k_dreamdojo` (base camera, apples-to-apples vs WAN) and `pi05_b1k_dreamdojo_wrist` (wrist cameras, egocentric-prior match).
+
+### Validation
+
+```
+docs/PHASE6_PLAN.md renders cleanly, all internal references valid.
+Sub-phase dependency graph is acyclic.
+Plan structure matches PHASE4_PLAN.md conventions (locked decisions, sub-phase status, detailed instructions, tests, risks, effort).
+```
+
+---
+
 ## Phase 4: Adapter Training (2026-05-04)
 
 **Goal**: Train the VEGA-3D fusion adapters (`P_gen`, `P_sem`, `fusion.*`) on B1K demonstration data so the gated fusion produces actionable improvements over the frozen baseline.

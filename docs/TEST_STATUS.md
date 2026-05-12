@@ -5,6 +5,132 @@ Newest phase appears first.
 
 ---
 
+## Phase 6: DreamDojo as Third Generative-Tower Backbone
+
+### Sub-Phase 6.2 — Real Loader + feat_dim Introspection (2026-05-12)
+
+**Goal**: Replace scaffold with real DreamDojo model loading, introspect feat_dim from loaded config.
+
+**Environment**: Python 3.10, PyTorch 2.7.1+cu126, diffusers 0.37.1, RTX 6000 Ada 49GB.
+
+### Completed Tests (9)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Registry keys unchanged | `{"vae", "wan_t2v", "dreamdojo"}` still present | **PASS** |
+| `DreamDojoTower("dummy")` instantiates (offline mode) | No-checkpoint fallback works, `transformer=None` | **PASS** |
+| `encode()` shape `[1, 256, 2048]` | Output contract unchanged from 6.1 | **PASS** |
+| `variant="student"` raises `NotImplementedError` | Student variant still refused | **PASS** |
+| `feat_dim` = 2048 from config (offline) | Config-based introspection: 16 heads × 128 dim | **PASS** |
+| `feat_dim` consistent across multiple constructions | Same value every time | **PASS** |
+| `freeze()` makes all params non-trainable | 0 trainable params (offline: no model; online: all frozen) | **PASS** |
+| `num_blocks` = 28 | Block count matches Cosmos-Predict2.5-2B architecture | **PASS** |
+| `feat_block_idx=28` raises `ValueError` | Out-of-range block index caught | **PASS** |
+
+### Online Loading Test (synthetic checkpoint)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Round-trip: diffusers model → reverse key map → NVIDIA format → save → load | 570 keys matched, 0 missing architecture keys | **PASS** |
+| Action keys skipped | `action_embedder_*` keys reported as unexpected, not loaded | **PASS** |
+| `freeze()` online: 570 params, 0 trainable | All loaded params frozen | **PASS** |
+| `encode()` returns correct shape from online tower | `[2, 256, 2048]` — same contract as offline | **PASS** |
+
+### Additional Validation
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| All 32 TrainConfigs parse | No regressions to existing configs | **PASS** |
+
+### Architecture Facts Confirmed
+
+| Property | Value | Source |
+|----------|-------|--------|
+| hidden_size | 2048 (16 × 128) | DreamDojo DCP metadata + diffusers instantiation |
+| num_layers | 28 | DCP metadata: blocks 0–27 |
+| in_channels | 17 (16 VAE + 1 action) | x_embedder weight shape (2048, 72) = 18×4 |
+| out_channels | 16 | final_layer weight shape (64, 2048) = 16×4 |
+| total params | 1.96B (2B config) | diffusers meta-device instantiation |
+
+---
+
+### Sub-Phase 6.1 — Skeleton DreamDojoTower Scaffold (2026-05-12)
+
+**Goal**: Create placeholder `DreamDojoTower(BaseTower)`, register in TOWER_REGISTRY, verify end-to-end.
+
+**Environment**: Python 3.10, PyTorch 2.7.1+cu126, CPU-only (no checkpoint needed).
+
+### Completed Tests (7)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `TOWER_REGISTRY.keys()` shows `{"vae", "wan_t2v", "dreamdojo"}` | Registry contains exactly 3 keys after adding dreamdojo | **PASS** |
+| `DreamDojoTower(checkpoint_dir="dummy")` instantiates | Scaffold construction works without a real checkpoint | **PASS** |
+| `tower.encode(torch.zeros(1, 3, 224, 224))` returns shape `[1, 256, 2048]` | Output contract matches BaseTower (256 tokens, feat_dim=2048) | **PASS** |
+| `tower.encode(torch.zeros(4, 3, 224, 224))` returns shape `[4, 256, 2048]` | Batch dimension handled correctly | **PASS** |
+| `DreamDojoTower(variant="student")` raises `NotImplementedError` | Student variant explicitly refused with clear message | **PASS** |
+| `tower.feat_dim == 2048` | Property returns expected placeholder value | **PASS** |
+| `tower.check_output(images)` returns correct diagnostics | Inherited BaseTower method works: output_shape, feat_dim, frozen=True | **PASS** |
+
+### Additional Validation
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `scripts/test_tower.py --offline` | Syntax (19/19), ABC contract, import graph, registry, diagnostics — all pass | **PASS** |
+| All 32 TrainConfigs parse | No regressions to existing configs | **PASS** |
+
+---
+
+### Sub-Phase 6.0 — Investigation & Locked Decisions (2026-05-12)
+
+**Goal**: Investigate Cosmos-Predict2.5-2B architecture, identify blockers, lock design decisions.
+
+**Environment**: Same as Phase 4 (Python 3.10, PyTorch 2.7.1+cu126). Web research against diffusers docs, HuggingFace model cards, NVIDIA repos.
+
+### Completed Tests (3)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| PHASE6_INVESTIGATION.md renders cleanly, all internal references resolve | Doc is complete and well-structured (287 lines) | **PASS** |
+| Locked decisions cross-reference sources | Decision 1 cites HF diffusers docs, Decision 3 cites Cosmos-Tokenizer repo `CV8x8x8` naming | **PASS** |
+| Dependency graph is acyclic | Sub-phase deps form a DAG: 6.0→6.1→6.2→6.3→6.4→{6.5,6.7}→6.6→6.8 | **PASS** |
+
+### Critical Correction Found
+
+| Issue | Original Plan | Corrected Value | Source |
+|-------|--------------|-----------------|--------|
+| input_resolution | 448 (yields 784 tokens) | **256** (yields 256 tokens) | Cosmos VAE 8x spatial + patch (1,2,2) = 16x stride |
+
+---
+
+### Phase 6 Planning — Plan committed (2026-05-12)
+
+**Goal**: Commit `docs/PHASE6_PLAN.md` with full sub-phase breakdown. No code changes.
+
+**Environment**: Same as Phase 4 (Python 3.10, PyTorch 2.7.1+cu126).
+
+### Completed Tests (1)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Plan doc renders cleanly, structure matches PHASE4_PLAN.md conventions | Phase 6 plan is valid and ready for execution | **PASS** |
+
+### Follow-ups (pending Sub-Phases 6.0-6.8)
+
+| Item | Notes |
+|------|--------|
+| Investigation doc | Sub-phase 6.0 — write `PHASE6_INVESTIGATION.md` with blocker analysis and locked decisions. |
+| Skeleton scaffold | Sub-phase 6.1 — `DreamDojoTower(BaseTower)` placeholder in TOWER_REGISTRY. |
+| Real loader + feat_dim | Sub-phase 6.2 — load Cosmos-Predict2.5-2B, introspect hidden dim. **Requires checkpoint download.** |
+| Null-action forward pass | Sub-phase 6.3 — real `encode()` with zero actions/text. **Highest risk sub-phase.** |
+| Spatial-grid adaptation | Sub-phase 6.4 — 448x448 input -> 256 tokens output. |
+| TrainConfig integration | Sub-phase 6.5 — `pi05_b1k_dreamdojo` config entry + smoke test. |
+| Camera-choice config | Sub-phase 6.6 — `pi05_b1k_dreamdojo_wrist` for egocentric cameras. |
+| test_tower.py validation | Sub-phase 6.7 — existing script validates new backbone. |
+| Documentation + cleanup | Sub-phase 6.8 — final docs pass. |
+
+---
+
 ## Phase 4: Adapter Training
 
 ### Sub-Phase 4.1 — Data config + TrainConfig (2026-05-04)
