@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from typing_extensions import override
 
+from openpi.models import adaptive_gated_fusion as _agf
 from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
@@ -99,8 +100,62 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # Task conditioning: task embedding added to flow-matching time conditioning.
+        self.num_tasks = config.num_tasks
+        self.task_embedding_scale = config.task_embedding_scale
+        if self.num_tasks > 0:
+            self.task_embeddings = nnx.Embed(self.num_tasks, action_expert_config.width, rngs=rngs)
+            logger.info(
+                "Task embeddings enabled: %d tasks, scale=%s", self.num_tasks, self.task_embedding_scale
+            )
+
+        # VEGA-3D Adaptive Gated Fusion (paper Eqs. 6-8). The spatial tower itself
+        # is PyTorch-only today (diffusers VAE / Wan T2V) and runs offline -- the
+        # JAX path consumes precomputed `observation.tower_features`. `spatial_tower`
+        # is reserved as a placeholder for a future JAX tower port.
+        self.use_vega3d = config.use_vega3d
+        self.spatial_tower = None
+        if self.use_vega3d:
+            hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
+            feat_dim = config.vega3d_tower_feat_dim
+            self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
+            self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
+            self.fusion = _agf.AdaptiveGatedFusion(
+                hidden, force_gate=config.vega3d_force_gate, rngs=rngs
+            )
+            self._spatial_cameras = tuple(config.vega3d_cameras)
+            logger.info(
+                "VEGA-3D fusion enabled: tower=%s (feat_dim=%d), cameras=%s, gate=%s",
+                config.vega3d_tower_name,
+                feat_dim,
+                self._spatial_cameras,
+                "learned" if config.vega3d_force_gate is None else f"forced={config.vega3d_force_gate}",
+            )
+        else:
+            self.P_gen = None
+            self.P_sem = None
+            self.fusion = None
+            self._spatial_cameras = ()
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
+
+    def _fuse_camera(
+        self, gen_feats: at.Array, semantic_tokens: at.Array
+    ) -> at.Array:
+        """Apply VEGA-3D Adaptive Gated Fusion for one camera stream.
+
+        Args:
+            gen_feats: [B, N, feat_dim] precomputed spatial-tower features.
+            semantic_tokens: [B, N, D_llm] PaliGemma image tokens for this camera.
+
+        Returns:
+            [B, N, D_llm] fused tokens (same shape as semantic_tokens).
+        """
+        gen_feats = gen_feats.astype(semantic_tokens.dtype)
+        f_gen = self.P_gen(gen_feats)
+        f_sem = self.P_sem(semantic_tokens)
+        return self.fusion(f_gen, f_sem)
 
     @at.typecheck
     def embed_prefix(
@@ -112,6 +167,16 @@ class Pi0(_model.BaseModel):
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+
+            # VEGA-3D: fuse precomputed spatial-tower features into this stream
+            # when configured. Tower features come from the dataloader (or a
+            # future JAX tower) and must have the same token count as SigLIP.
+            if self.use_vega3d and name in self._spatial_cameras:
+                if obs.tower_features is None or name not in obs.tower_features:
+                    raise ValueError(
+                        f"use_vega3d=True but observation.tower_features is missing camera {name!r}"
+                    )
+                image_tokens = self._fuse_camera(obs.tower_features[name], image_tokens)
 
             tokens.append(image_tokens)
             input_mask.append(
@@ -159,6 +224,11 @@ class Pi0(_model.BaseModel):
         action_tokens = self.action_in_proj(noisy_actions)
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
+        if self.num_tasks > 0:
+            if obs.task_id is None:
+                raise ValueError("num_tasks > 0 but observation.task_id is None")
+            task_emb = self.task_embeddings(obs.task_id).astype(time_emb.dtype)
+            time_emb = time_emb + self.task_embedding_scale * task_emb
         if self.pi05:
             # time MLP (for adaRMS)
             time_emb = self.time_mlp_in(time_emb)

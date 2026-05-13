@@ -97,6 +97,11 @@ class Observation(Generic[ArrayT]):
     proprio_visibility_mask: at.Float[ArrayT, "*b s"] | None = None
     # Task ID for task-conditioned models (optional).
     task_id: at.Int[ArrayT, "*b"] | None = None
+    # Precomputed spatial-tower features for VEGA-3D adaptive gated fusion, keyed
+    # by camera name. Shape per camera: [*b, n, d] where n must match the SigLIP
+    # token count for that stream and d is the tower's feat_dim. Optional; only
+    # consumed when `use_vega3d` is set in the model config.
+    tower_features: dict[str, at.Float[ArrayT, "*b n d"]] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -128,6 +133,7 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             proprio_visibility_mask=data.get("proprio_visibility_mask"),
             task_id=data.get("task_id"),
+            tower_features=data.get("tower_features"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -207,6 +213,9 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        proprio_visibility_mask=observation.proprio_visibility_mask,
+        task_id=observation.task_id,
+        tower_features=observation.tower_features,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
