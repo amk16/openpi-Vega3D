@@ -11,6 +11,7 @@ RUN git clone https://github.com/amk16/openpi-Vega3D
 WORKDIR /opt/workspace-internal/openpi-Vega3D
 RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv sync
 RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv pip install --system -e .
+WORKDIR /opt/workspace-internal
 
 # Custom aliases
 RUN echo "alias nvidia-smi='watch -n 1 nvidia-smi'" >> /root/.bashrc && \
@@ -21,3 +22,8 @@ COPY onstart.sh /opt/scripts/onstart.sh
 RUN chmod +x /opt/scripts/onstart.sh
 
 RUN touch ~/.no_auto_tmux
+
+# Install Node.js + npm + Claude Code
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y nodejs
+RUN npm install -g @anthropic-ai/claude-code
