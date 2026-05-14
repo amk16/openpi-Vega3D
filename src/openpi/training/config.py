@@ -867,12 +867,12 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
-        batch_size=256,
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=5e-5,  # TODO: remember to decrease if lowering batch size
+            peak_lr=1e-5,
             decay_steps=30_000,
-            decay_lr=5e-6,  # TODO: remember to decrease if lowering batch size
+            decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         freeze_filter=pi0_config.Pi0Config(

@@ -3,7 +3,6 @@
 # Download dataset
 NVME_DIR=/workspace
 HF_HOME="$NVME_DIR/.hf_home"
-echo $HF_HOME
 aws s3 sync s3://behavior-challenge/lerobot/ "$HF_HOME/lerobot/"
 
 # Activate venv
