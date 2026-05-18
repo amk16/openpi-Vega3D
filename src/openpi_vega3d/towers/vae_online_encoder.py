@@ -81,10 +81,10 @@ class VAEOnlineEncoder(nn.Module):
             for chunk in chunks:
                 outputs.append(self._forward_single_video(chunk))
         out = torch.cat(outputs, dim=0)
-        log_tower(
-            "VAEOnlineEncoder forward: in=%s out=%s device=%s",
-            tuple(frames.shape),
-            tuple(out.shape),
-            device,
-        )
+        # log_tower(
+        #     "VAEOnlineEncoder forward: in=%s out=%s device=%s",
+        #     tuple(frames.shape),
+        #     tuple(out.shape),
+        #     device,
+        # )
         return out

@@ -118,13 +118,27 @@ class PI0Pytorch(nn.Module):
         self.use_vega3d = getattr(config, "use_vega3d", False)
         if self.use_vega3d:
             from openpi.models_pytorch.adaptive_gated_fusion import AdaptiveGatedFusion
-            from openpi_vega3d.towers import TOWER_REGISTRY
 
-            # output_spatial is injected to 16 by load_b1k_policy so the tower's
-            # 16x16 grid matches PaliGemma's native 256-token SigLIP layout.
             tower_kwargs = dict(config.vega3d_tower_kwargs or {})
-            self.spatial_tower = TOWER_REGISTRY[config.vega3d_tower_name](**tower_kwargs)
-            feat_dim = self.spatial_tower.feat_dim
+            skip_tower = getattr(config, "vega3d_skip_tower_construction", False)
+            if skip_tower:
+                # Precomputed-features training path: avoid loading WAN weights
+                # into RAM. P_gen needs the feat_dim, which must be specified
+                # statically on the config in this mode.
+                if config.vega3d_tower_feat_dim is None:
+                    raise ValueError(
+                        "vega3d_skip_tower_construction=True requires "
+                        "vega3d_tower_feat_dim to be set explicitly on the config."
+                    )
+                self.spatial_tower = None
+                feat_dim = config.vega3d_tower_feat_dim
+            else:
+                from openpi_vega3d.towers import TOWER_REGISTRY
+                # output_spatial is injected to 16 by load_b1k_policy so the
+                # tower's 16x16 grid matches PaliGemma's native 256-token SigLIP
+                # layout.
+                self.spatial_tower = TOWER_REGISTRY[config.vega3d_tower_name](**tower_kwargs)
+                feat_dim = self.spatial_tower.feat_dim
 
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             self.P_gen = nn.Linear(feat_dim, hidden)
@@ -133,8 +147,8 @@ class PI0Pytorch(nn.Module):
             self._spatial_cameras = tuple(config.vega3d_cameras)
 
             logging.info(
-                "VEGA-3D fusion enabled: tower=%s (feat_dim=%d), cameras=%s, gate=%s",
-                config.vega3d_tower_name, feat_dim, self._spatial_cameras,
+                "VEGA-3D fusion enabled: tower=%s (feat_dim=%d, skip_tower=%s), cameras=%s, gate=%s",
+                config.vega3d_tower_name, feat_dim, skip_tower, self._spatial_cameras,
                 "learned" if config.vega3d_force_gate is None else f"forced={config.vega3d_force_gate}",
             )
         else:
@@ -207,6 +221,7 @@ class PI0Pytorch(nn.Module):
             getattr(observation, "proprio_visibility_mask", None),
             getattr(observation, "task_id", None),
             list(observation.images.keys()),  # image_names, for VEGA-3D camera lookup
+            getattr(observation, "tower_features", None),  # precomputed VEGA features, optional
         )
 
     def sample_noise(self, shape, device):
@@ -223,12 +238,20 @@ class PI0Pytorch(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=torch.float32, device=device)
 
-    def _fuse_camera(self, raw_image: torch.Tensor, semantic_tokens: torch.Tensor) -> torch.Tensor:
+    def _fuse_camera(
+        self,
+        raw_image: torch.Tensor,
+        semantic_tokens: torch.Tensor,
+        precomputed: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply VEGA-3D Adaptive Gated Fusion for one camera stream.
 
         Args:
-            raw_image: [B, 3, H, W] RGB frame fed to the tower.
+            raw_image: [B, 3, H, W] RGB frame fed to the tower (ignored when
+                ``precomputed`` is supplied).
             semantic_tokens: [B, N, D_llm] PaliGemma image tokens for this camera.
+            precomputed: Optional [B, N, feat_dim] tensor of tower features
+                from the dataloader; skips the live tower forward when present.
 
         Returns:
             [B, N, D_llm] fused tokens (same shape as semantic_tokens).
@@ -236,7 +259,16 @@ class PI0Pytorch(nn.Module):
         # Tower encode runs under its own inference_mode + autocast; the output
         # can be bf16 while P_gen / P_sem / fusion live in fp32 at init. Align
         # dtypes to semantic_tokens so the convex combination stays consistent.
-        gen_feats = self.spatial_tower.encode(raw_image)
+        if precomputed is not None:
+            gen_feats = precomputed
+        else:
+            if self.spatial_tower is None:
+                raise RuntimeError(
+                    "VEGA-3D fusion requested but spatial_tower was not "
+                    "constructed (vega3d_skip_tower_construction=True) and no "
+                    "precomputed tower_features were supplied for this camera."
+                )
+            gen_feats = self.spatial_tower.encode(raw_image)
         gen_feats = gen_feats.to(dtype=semantic_tokens.dtype)
 
         F_gen = self.P_gen(gen_feats)                 # [B, N, D_llm]
@@ -244,14 +276,16 @@ class PI0Pytorch(nn.Module):
         return self.fusion(F_gen, F_sem)
 
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks, image_names=None,
+        self, images, img_masks, lang_tokens, lang_masks, image_names=None, tower_features=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for PaliGemma transformer processing.
 
         When VEGA-3D is active and image_names is provided, any camera listed in
         self._spatial_cameras has its PaliGemma tokens replaced by the adaptive
-        gated fusion of P_gen(tower(img)) and P_sem(sem_tokens).
+        gated fusion of P_gen(tower(img)) and P_sem(sem_tokens). If
+        ``tower_features[cam_name]`` is supplied, the live tower forward is
+        skipped and the precomputed features are used directly.
         """
         embs = []
         pad_masks = []
@@ -269,8 +303,11 @@ class PI0Pytorch(nn.Module):
             img_emb = self._apply_checkpoint(image_embed_func, img)
 
             # VEGA-3D: fuse spatial tower features into this stream if configured.
-            if self.spatial_tower is not None and cam_name in self._spatial_cameras:
-                img_emb = self._fuse_camera(img, img_emb)
+            if self.use_vega3d and cam_name in self._spatial_cameras:
+                precomputed = None
+                if tower_features is not None and cam_name in tower_features:
+                    precomputed = tower_features[cam_name]
+                img_emb = self._fuse_camera(img, img_emb, precomputed=precomputed)
 
             bsize, num_img_embs = img_emb.shape[:2]
 
@@ -394,7 +431,7 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, noise=None, time=None, return_per_dim=False) -> Tensor | tuple[Tensor, Tensor]:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names = self._preprocess_observation(observation, train=True)
+        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names, tower_features = self._preprocess_observation(observation, train=True)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -406,7 +443,7 @@ class PI0Pytorch(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names, tower_features=tower_features)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time, proprio_visibility_mask, task_id)
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -459,9 +496,9 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names = self._preprocess_observation(observation, train=False)
+        images, img_masks, lang_tokens, lang_masks, state, proprio_visibility_mask, task_id, image_names, tower_features = self._preprocess_observation(observation, train=False)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, image_names=image_names, tower_features=tower_features)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

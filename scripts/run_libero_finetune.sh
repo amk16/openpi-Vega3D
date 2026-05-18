@@ -4,6 +4,7 @@
 NVME_DIR=/workspace
 HF_HOME="$NVME_DIR/.hf_home"
 aws s3 sync s3://behavior-challenge/lerobot/ "$HF_HOME/lerobot/"
+aws s3 sync s3://behavior-challenge/tower_features/ /workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536
 
 # Activate venv
 source /venv/main/bin/activate

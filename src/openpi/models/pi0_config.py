@@ -62,6 +62,12 @@ class Pi0Config(_model.BaseModelConfig):
     # init time. Auto-derived from `vega3d_tower_name` in __post_init__ when
     # left as None.
     vega3d_tower_feat_dim: int | None = None
+    # When True, do NOT instantiate the PyTorch spatial_tower at model
+    # construction time. Saves ~3GB RAM during precomputed-feature training
+    # runs where observation.tower_features always supplies the features and
+    # the live tower forward path is never taken. Must stay False for any
+    # eval/inference run that needs to compute features live from images.
+    vega3d_skip_tower_construction: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .common import resize_center_crop, resolve_inference_dtype, split_frames, to_neg_one_to_one
+from .common import resize_letterbox_pad, resolve_inference_dtype, split_frames, to_neg_one_to_one
 from .rollout_tower_log import log_tower
 from .wan.configs import WAN_CONFIGS, SIZE_CONFIGS
 from .wan.modules.model import WanModel
@@ -115,10 +115,12 @@ class WanT2VOnlineEncoder(nn.Module):
 
     def _prepare_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """
-        Convert input frames to [-1, 1], resize/crop to WAN resolution.
+        Convert input frames to [-1, 1], then resize to WAN resolution with
+        aspect-preserving letterbox padding (no image content is cropped).
+        Pad bars are black (-1.0 in [-1, 1]), matching real letterbox video.
         """
         x = to_neg_one_to_one(frames)
-        x = resize_center_crop(x, self.frame_height, self.frame_width)
+        x = resize_letterbox_pad(x, self.frame_height, self.frame_width, pad_value=-1.0)
         return x.to(dtype=self.param_dtype)
 
     def _get_text_context(self, device: torch.device, batch_size: int):
@@ -243,10 +245,10 @@ class WanT2VOnlineEncoder(nn.Module):
         for chunk in chunks:
             outs.append(self._forward_single_video(chunk, device=device))
         out = torch.cat(outs, dim=0)
-        log_tower(
-            "WanT2VOnlineEncoder forward: in=%s out=%s device=%s",
-            tuple(frames.shape),
-            tuple(out.shape),
-            device,
-        )
+        # log_tower(
+        #     "WanT2VOnlineEncoder forward: in=%s out=%s device=%s",
+        #     tuple(frames.shape),
+        #     tuple(out.shape),
+        #     device,
+        # )
         return out

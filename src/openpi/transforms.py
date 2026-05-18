@@ -335,6 +335,49 @@ class ExtractTaskID(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class LoadPrecomputedTowerFeatures(DataTransformFn):
+    """Reads VEGA-3D tower features from a per-episode safetensors cache and
+    attaches them to the data dict under ``tower_features``.
+
+    Cache layout written by scripts/precompute_tower_features.py:
+        <cache_dir>/<camera_name>/ep_<episode_index:06d>.safetensors
+    Each file contains a single tensor "features" of shape
+    [num_frames_in_episode, num_tokens, feat_dim].
+
+    Requires ``episode_index`` and ``frame_index`` to be present in ``data``
+    (the data config must arrange for the repack transform to pass them
+    through). The model's _fuse_camera path will pick up ``tower_features``
+    from the resulting Observation and skip its live tower forward.
+    """
+
+    cache_dir: str
+    cameras: Sequence[str]
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "episode_index" not in data or "frame_index" not in data:
+            raise ValueError(
+                "LoadPrecomputedTowerFeatures requires episode_index and "
+                "frame_index in the data dict; ensure the repack transform "
+                "passes them through."
+            )
+
+        import safetensors
+
+        ep = int(np.asarray(data["episode_index"]).item())
+        frame = int(np.asarray(data["frame_index"]).item())
+
+        tower_features = {}
+        for cam in self.cameras:
+            path = f"{self.cache_dir}/{cam}/ep_{ep:06d}.safetensors"
+            with safetensors.safe_open(path, framework="np") as f:
+                slice_view = f.get_slice("features")
+                # safetensors slicing is end-exclusive; pull a single row.
+                tower_features[cam] = np.asarray(slice_view[frame:frame + 1, :, :]).squeeze(0)
+
+        return {**data, "tower_features": tower_features}
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 

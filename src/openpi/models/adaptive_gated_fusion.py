@@ -26,15 +26,35 @@ class AdaptiveGatedFusion(nnx.Module):
     the same spatial location as token i in F_sem.
     """
 
-    def __init__(self, hidden_size: int, *, force_gate: float | None, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        hidden_size: int,
+        *,
+        force_gate: float | None,
+        gate_init_bias: float = 4.0,
+        rngs: nnx.Rngs,
+    ):
         if force_gate is not None and not 0.0 <= force_gate <= 1.0:
             raise ValueError(f"force_gate must be in [0, 1], got {force_gate}")
         self.hidden_size = hidden_size
         self.force_gate = force_gate
         self.ln_gen = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.ln_sem = nnx.LayerNorm(hidden_size, rngs=rngs)
-        # W_g and b_g baked into a single 2D->1 projection.
-        self.gate_proj = nnx.Linear(2 * hidden_size, 1, rngs=rngs)
+        # W_g and b_g baked into a single 2D->1 projection. The kernel is
+        # zero-initialized and the bias set to gate_init_bias, so at step 0 the
+        # gate is the constant sigmoid(gate_init_bias) at every position
+        # (g ~= 0.982 by default). The fused output then starts as ~pure F_sem
+        # -- vanilla pi05 -- so the random-init P_gen does not perturb the
+        # pretrained model before training adapts it. Gradient still flows to
+        # the kernel (dg/dW = g(1-g)*concat != 0), so the generative stream
+        # ramps in as training progresses.
+        self.gate_proj = nnx.Linear(
+            2 * hidden_size,
+            1,
+            kernel_init=nnx.initializers.zeros,
+            bias_init=nnx.initializers.constant(gate_init_bias),
+            rngs=rngs,
+        )
 
     def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray) -> jnp.ndarray:
         if f_gen.shape != f_sem.shape:

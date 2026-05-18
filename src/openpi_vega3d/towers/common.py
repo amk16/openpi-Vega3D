@@ -66,6 +66,37 @@ def resize_center_crop(frames: torch.Tensor, out_h: int, out_w: int) -> torch.Te
     return x[:, :, top : top + out_h, left : left + out_w]
 
 
+def resize_letterbox_pad(
+    frames: torch.Tensor, out_h: int, out_w: int, pad_value: float = 0.0
+) -> torch.Tensor:
+    """Resize frames to fit inside (out_h, out_w) preserving aspect ratio, then
+    pad the leftover border with `pad_value` (letterbox / pillarbox).
+
+    Unlike `resize_center_crop`, no image content is discarded: the frame is
+    scaled down to fit and the remaining border is filled. For a square frame
+    going into a 16:9 target this produces vertical (pillarbox) bars.
+
+    Frames are expected to already be in [-1, 1]; `pad_value=0.0` is mid-gray.
+    """
+    if frames.ndim != 4:
+        raise ValueError(f"Expected [N, C, H, W], got {tuple(frames.shape)}")
+    n, c, h, w = frames.shape
+    if c != 3:
+        raise ValueError(f"Expected 3 channels, got {c}")
+
+    scale = min(out_h / h, out_w / w)
+    new_h = max(1, int(round(h * scale)))
+    new_w = max(1, int(round(w * scale)))
+    x = F.interpolate(frames, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+    pad_h = max(0, out_h - new_h)
+    pad_w = max(0, out_w - new_w)
+    top = pad_h // 2
+    left = pad_w // 2
+    # F.pad pads the last dim first: (left, right, top, bottom).
+    return F.pad(x, (left, pad_w - left, top, pad_h - top), mode="constant", value=pad_value)
+
+
 def temporal_resample(frames: torch.Tensor, target_frames: int) -> torch.Tensor:
     if target_frames <= 0:
         raise ValueError(f"target_frames must be > 0, got {target_frames}")
