@@ -392,6 +392,80 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotLiberoVegaDataConfig(LeRobotLiberoDataConfig):
+    """Libero data config that loads precomputed VEGA-3D tower features from disk.
+
+    Mirrors LeRobotLiberoDataConfig but:
+      1. Augments the repack transform to pass episode_index / frame_index
+         through to data_transforms (LeRobot dataset items expose these fields,
+         but the standard libero repack drops them).
+      2. Inserts LoadPrecomputedTowerFeatures at the head of data_transforms.inputs
+         so each item picks up its precomputed features keyed by (episode, frame).
+
+    The cache directory must be populated by scripts/precompute_tower_features.py
+    before training. The model side is unchanged — _fuse_camera consumes
+    observation.tower_features when present and falls back to live tower encode
+    when absent (eval/rollout path).
+    """
+
+    tower_features_cache_dir: str = ""
+    tower_features_cameras: tuple[str, ...] = ("base_0_rgb",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not self.tower_features_cache_dir:
+            raise ValueError(
+                "LeRobotLiberoVegaDataConfig requires tower_features_cache_dir; "
+                "populate it via scripts/precompute_tower_features.py first."
+            )
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                        # Preserve LeRobot index fields so the precompute-load
+                        # transform downstream can address the cache.
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                _transforms.LoadPrecomputedTowerFeatures(
+                    cache_dir=self.tower_features_cache_dir,
+                    cameras=self.tower_features_cameras,
+                ),
+                libero_policy.LiberoInputs(model_type=model_config.model_type),
+            ],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -598,6 +672,15 @@ class TrainConfig:
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
+    # If set, checkpoints are uploaded to this S3 bucket during training. Every
+    # checkpoint except the most recent is uploaded in a background thread and
+    # then deleted from local disk once the upload succeeds; the newest is
+    # always kept on disk for resume/eval. If None, no S3 upload happens.
+    s3_checkpoint_bucket: str | None = None
+    # Key prefix within the bucket. Checkpoints are uploaded to
+    # s3://<bucket>/<prefix>/<config name>/<exp_name>/<step>/.
+    s3_checkpoint_prefix: str = "openpi_checkpoints"
+
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
     # If true, will resume training from the last checkpoint.
@@ -615,14 +698,15 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
-    # How often (in steps) to log validation metrics.
-    val_log_interval: int = 100
+    # How often (in steps) to run validation. If None, syncs to save_interval.
+    val_log_interval: int | None = None
     # Validation batch size (optional, defaults to batch_size if not set).
     val_batch_size: int | None = None
     # Number of validation batches to average for validation loss.
     val_num_batches: int = 10
     # Optionally, repo_id for validation set (if different from train).
     val_repo_id: str | None = None
+    # Episode indices held out for validation. If None, validation is disabled.
     val_episodes_index: list[int] | None = None
 
     @property
@@ -875,6 +959,106 @@ _CONFIGS = [
             decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # WAN tower in-process: dropped from 64 to 8 to fit on a single 48GB GPU.
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+            # Tower stays out of RAM during training; precomputed features
+            # supply the generative stream. Eval configs must NOT set this.
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # No WAN in-process: same batch budget as the non-VEGA libero run.
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            # 1e-5 is conservative for batch 64: the validated pi05_libero
+            # full-finetune uses peak_lr=5e-5 at batch 256 (~1.2e-5 when
+            # batch-scaled down to 64). The global LR is capped by SigLIP,
+            # which get_freeze_filter() leaves fully unfrozen -- a
+            # LoRA-magnitude LR (1e-4+) would over-train the pretrained tower.
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Hold out 85 episodes (every 20th) as the validation set. The stride
+        # keeps all ~34 LIBERO tasks represented in training -- a contiguous
+        # range would pull whole tasks out. Edit this list to pick your own.
+        val_episodes_index=list(range(0, 1693, 20)),
+        # Stream checkpoints to S3; keep only the newest on local disk.
+        s3_checkpoint_bucket="behavior-challenge",
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
