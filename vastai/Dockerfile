@@ -3,12 +3,12 @@ FROM vastai/base-image:cuda-12.9.1-cudnn-devel-ubuntu24.04-py311-2026-03-26
 ENV PATH="/venv/main/bin:$PATH"
 ENV UV_PROJECT_ENVIRONMENT="/venv/main"
 
+# Copy lockfiles to bust cache when deps change
+COPY pyproject.toml uv.lock /tmp/.cache-trigger/
+
 # Clone repo
 WORKDIR /opt/workspace-internal
 RUN git clone https://github.com/amk16/openpi-Vega3D
-
-# Copy lockfiles to bust cache when deps change
-COPY pyproject.toml uv.lock /tmp/.cache-trigger/
 
 # Install dependencies
 WORKDIR /opt/workspace-internal/openpi-Vega3D
