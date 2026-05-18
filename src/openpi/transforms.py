@@ -362,6 +362,7 @@ class LoadPrecomputedTowerFeatures(DataTransformFn):
             )
 
         import safetensors
+        import torch
 
         ep = int(np.asarray(data["episode_index"]).item())
         frame = int(np.asarray(data["frame_index"]).item())
@@ -369,10 +370,15 @@ class LoadPrecomputedTowerFeatures(DataTransformFn):
         tower_features = {}
         for cam in self.cameras:
             path = f"{self.cache_dir}/{cam}/ep_{ep:06d}.safetensors"
-            with safetensors.safe_open(path, framework="np") as f:
+            # The cache is bf16; numpy has no bfloat16, so framework="np" raises
+            # "data type 'bfloat16' not understood". Read via torch (bf16-capable)
+            # and upcast to float32 for the numpy data pipeline -- the model
+            # casts gen_feats to the compute dtype in _fuse_camera anyway.
+            with safetensors.safe_open(path, framework="pt") as f:
                 slice_view = f.get_slice("features")
                 # safetensors slicing is end-exclusive; pull a single row.
-                tower_features[cam] = np.asarray(slice_view[frame:frame + 1, :, :]).squeeze(0)
+                row = slice_view[frame:frame + 1, :, :]
+            tower_features[cam] = row.squeeze(0).to(torch.float32).numpy()
 
         return {**data, "tower_features": tower_features}
 
