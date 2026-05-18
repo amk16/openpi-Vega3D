@@ -967,7 +967,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
-        num_workers=20,
+        num_workers=16,
     ),
     TrainConfig(
         name="pi05_libero_lora_wan",
@@ -1068,7 +1068,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
-        num_workers=20,
+        num_workers=16,
     ),
     # Control for the WAN ablation. Identical to pi05_libero_lora_wan_precomp --
     # same P_gen / P_sem / fusion architecture, same precomputed-feature data
@@ -1125,7 +1125,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
-        num_workers=20,
+        num_workers=16,
     ),
     #
     # Fine-tuning Aloha configs.
