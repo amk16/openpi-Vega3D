@@ -120,6 +120,11 @@ class Pi0(_model.BaseModel):
             feat_dim = config.vega3d_tower_feat_dim
             self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
             self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
+            # Identity-initialize P_sem so the semantic stream starts as a no-op
+            # (f_sem == SigLIP tokens). With the gate biased to semantic, the
+            # fused output then begins as ~vanilla pi05. P_sem stays fully
+            # learnable -- this only sets the optimization starting point.
+            self.P_sem.kernel.value = jnp.eye(hidden, dtype=self.P_sem.kernel.value.dtype)
             self.fusion = _agf.AdaptiveGatedFusion(
                 hidden, force_gate=config.vega3d_force_gate, rngs=rngs
             )

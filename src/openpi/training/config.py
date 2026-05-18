@@ -959,6 +959,10 @@ _CONFIGS = [
             decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Same held-out validation split and S3 checkpoint streaming as the
+        # WAN variant, so the baseline and WAN runs are directly comparable.
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
@@ -1058,6 +1062,62 @@ _CONFIGS = [
         # range would pull whole tasks out. Edit this list to pick your own.
         val_episodes_index=list(range(0, 1693, 20)),
         # Stream checkpoints to S3; keep only the newest on local disk.
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Control for the WAN ablation. Identical to pi05_libero_lora_wan_precomp --
+    # same P_gen / P_sem / fusion architecture, same precomputed-feature data
+    # pipeline, same hyperparameters and val split -- except vega3d_force_gate
+    # pins the fusion gate to 1.0, so the generative (WAN) stream is gated out
+    # entirely. vs pi05_libero_lora_wan_precomp this isolates the WAN
+    # contribution with architecture held fixed; vs pi05_libero_lora it isolates
+    # the cost/benefit of the extra P_sem projection.
+    TrainConfig(
+        name="pi05_libero_lora_wan_precomp_semonly",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+            vega3d_skip_tower_construction=True,
+            # Pin the fusion gate to pure-semantic: fused = f_sem. The WAN
+            # stream contributes nothing and P_gen receives no gradient.
+            vega3d_force_gate=1.0,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
         s3_checkpoint_bucket="behavior-challenge",
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
