@@ -191,6 +191,21 @@ def train_step(
     return new_state, info
 
 
+@at.typecheck
+def val_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> dict[str, at.Array]:
+    """Compute the validation loss for a single batch (no gradient update)."""
+    model = nnx.merge(state.model_def, state.params)
+    model.eval()
+    observation, actions = batch
+    loss = jnp.mean(model.compute_loss(rng, observation, actions, train=False))
+    return {"val_loss": loss}
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
@@ -214,17 +229,51 @@ def main(config: _config.TrainConfig):
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
+        # When checkpoints stream to S3, the uploader owns local-disk pruning,
+        # so orbax must keep every checkpoint rather than garbage-collecting.
+        keep_all=config.s3_checkpoint_bucket is not None,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+
+    # Train/validation episode split. When val_episodes_index is set, those
+    # episodes are held out from training and form the validation set.
+    val_episodes = list(config.val_episodes_index) if config.val_episodes_index else None
+    train_episodes = None
+    if val_episodes is not None and config.val_repo_id is None:
+        # Same-repo holdout: exclude the validation episodes from training.
+        num_episodes = _data_loader.get_num_episodes(config.data.repo_id)
+        val_set = set(val_episodes)
+        train_episodes = [e for e in range(num_episodes) if e not in val_set]
+        logging.info(
+            f"Validation split: {len(val_episodes)} held-out episodes, "
+            f"{len(train_episodes)} train episodes (of {num_episodes} total)."
+        )
 
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
+        episodes_index=train_episodes,
     )
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+
+    val_data_loader = None
+    if val_episodes is not None:
+        # shuffle_seed fixes the permutation so the capped validation pass
+        # samples representatively across all held-out episodes and is
+        # identical every time -- a prerequisite for a comparable val curve.
+        val_data_loader = _data_loader.create_data_loader(
+            config,
+            sharding=data_sharding,
+            shuffle=False,
+            episodes_index=val_episodes,
+            repo_id=config.val_repo_id,
+            batch_size=config.val_batch_size,
+            num_batches=config.val_num_batches,
+            shuffle_seed=config.seed,
+        )
 
     # Log images from first batch to sanity check.
     images_to_log = [
@@ -247,6 +296,25 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    pval_step = None
+    if val_data_loader is not None:
+        pval_step = jax.jit(
+            functools.partial(val_step, config),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+            out_shardings=replicated_sharding,
+        )
+
+    # Validation runs at the checkpoint cadence unless val_log_interval is set.
+    val_interval = config.val_log_interval if config.val_log_interval is not None else config.save_interval
+
+    s3_sync = None
+    if config.s3_checkpoint_bucket is not None:
+        s3_sync = _checkpoints.S3CheckpointSync(
+            checkpoint_dir=config.checkpoint_dir,
+            bucket=config.s3_checkpoint_bucket,
+            prefix=f"{config.s3_checkpoint_prefix.strip('/')}/{config.name}/{config.exp_name}",
+        )
+
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -256,6 +324,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    last_saved_step = None
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -269,11 +338,36 @@ def main(config: _config.TrainConfig):
             infos = []
         batch = next(data_iter)
 
+        if pval_step is not None and step % val_interval == 0:
+            val_infos = []
+            for val_batch_idx, val_batch in enumerate(val_data_loader):
+                # Fixed RNG per batch index: the validation loss is evaluated
+                # at the same noise levels every pass, so the curve is a clean
+                # comparison rather than reflecting per-pass sampling noise.
+                val_rng = jax.random.fold_in(jax.random.key(config.seed), val_batch_idx)
+                with sharding.set_mesh(mesh):
+                    val_infos.append(pval_step(val_rng, train_state, val_batch))
+            reduced_val = jax.device_get(jax.tree.map(jnp.mean, common_utils.stack_forest(val_infos)))
+            val_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_val.items())
+            pbar.write(f"Step {step}: {val_str}")
+            wandb.log(reduced_val, step=step)
+
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            last_saved_step = step
+            if s3_sync is not None:
+                # Queue every checkpoint older than this one for upload + prune.
+                s3_sync.after_save(step)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
+
+    if s3_sync is not None:
+        if last_saved_step is not None:
+            # Upload the final checkpoint too; it is kept on local disk.
+            s3_sync.upload_final(last_saved_step)
+        logging.info("Waiting for S3 checkpoint uploads to finish")
+        s3_sync.wait()
 
 
 if __name__ == "__main__":
