@@ -5,7 +5,7 @@ TAG := latest
 
 # Build for linux/amd64 (what Vast.ai runs)
 build:
-	docker buildx build --platform linux/amd64 -t $(IMAGE):$(TAG) .
+	docker buildx build --platform linux/amd64 -t $(IMAGE):$(TAG) -f Dockerfile ..
 
 # Build for native arch (fast, for testing Dockerfile logic only)
 build-native:

@@ -7,6 +7,9 @@ ENV UV_PROJECT_ENVIRONMENT="/venv/main"
 WORKDIR /opt/workspace-internal
 RUN git clone https://github.com/amk16/openpi-Vega3D
 
+# Copy lockfiles to bust cache when deps change
+COPY pyproject.toml uv.lock /tmp/.cache-trigger/
+
 # Install dependencies
 WORKDIR /opt/workspace-internal/openpi-Vega3D
 RUN --mount=type=cache,target=/root/.cache/uv GIT_LFS_SKIP_SMUDGE=1 uv sync
@@ -18,7 +21,7 @@ RUN echo "alias nvidia-smi='watch -n 1 nvidia-smi'" >> /root/.bashrc && \
     echo "alias du='du --max-depth=1 -h'" >> /root/.bashrc
 
 # Onstart script — point Vast.ai template to: bash /opt/scripts/onstart.sh
-COPY onstart.sh /opt/scripts/onstart.sh
+COPY vastai/onstart.sh /opt/scripts/onstart.sh
 RUN chmod +x /opt/scripts/onstart.sh
 
 RUN touch ~/.no_auto_tmux
