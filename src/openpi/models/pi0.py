@@ -118,7 +118,11 @@ class Pi0(_model.BaseModel):
         if self.use_vega3d:
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             feat_dim = config.vega3d_tower_feat_dim
-            self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
+            # Zero-initialize P_gen so the generative (WAN) stream contributes
+            # nothing at init: fused = g*P_sem(SigLIP), i.e. ~vanilla pi05.
+            # P_gen is a single matrix (not a B*A product), so dL/dP_gen does
+            # not depend on its value -- it trains normally from a zero start.
+            self.P_gen = nnx.Linear(feat_dim, hidden, kernel_init=nnx.initializers.zeros, rngs=rngs)
             self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
             # Identity-initialize P_sem so the semantic stream starts as a no-op
             # (f_sem == SigLIP tokens). With the gate biased to semantic, the

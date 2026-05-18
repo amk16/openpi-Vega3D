@@ -142,6 +142,12 @@ class PI0Pytorch(nn.Module):
 
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             self.P_gen = nn.Linear(feat_dim, hidden)
+            # Zero-initialize P_gen so the generative (WAN) stream contributes
+            # nothing at init: fused = g*P_sem(SigLIP), i.e. ~vanilla pi05.
+            # P_gen is a single matrix (not a B*A product), so dL/dP_gen does
+            # not depend on its value -- it trains normally from a zero start.
+            nn.init.zeros_(self.P_gen.weight)
+            nn.init.zeros_(self.P_gen.bias)
             self.P_sem = nn.Linear(hidden, hidden)
             # Identity-initialize P_sem so the semantic stream starts as a no-op
             # (f_sem == SigLIP tokens). With the gate biased to semantic, the
