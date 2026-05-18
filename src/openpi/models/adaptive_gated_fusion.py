@@ -41,20 +41,27 @@ class AdaptiveGatedFusion(nnx.Module):
         self.ln_gen = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.ln_sem = nnx.LayerNorm(hidden_size, rngs=rngs)
         # W_g and b_g baked into a single 2D->1 projection. The kernel is
-        # zero-initialized and the bias set to gate_init_bias, so at step 0 the
-        # gate is the constant sigmoid(gate_init_bias) at every position
-        # (g ~= 0.982 by default). The fused output then starts as ~pure F_sem
-        # -- vanilla pi05 -- so the random-init P_gen does not perturb the
-        # pretrained model before training adapts it. Gradient still flows to
-        # the kernel (dg/dW = g(1-g)*concat != 0), so the generative stream
-        # ramps in as training progresses.
+        # zero-initialized, so at step 0 the gate is the constant
+        # sigmoid(gate_init_bias) at every position (g ~= 0.982 by default):
+        # the fused output starts as ~pure F_sem -- vanilla pi05 -- so the
+        # zero-init P_gen does not perturb the pretrained model before training
+        # adapts it. Gradient still flows to the kernel
+        # (dg/dW = g(1-g)*concat != 0), so the generative stream ramps in.
+        #
+        # The bias VALUE is set after construction rather than via
+        # bias_init=constant(...): nnx.Linear keeps bias_init as a static
+        # graphdef field, and nnx.initializers.constant() returns a fresh
+        # closure on every call -- baking that in makes the graphdef differ
+        # between model constructions (eval_shape vs jit), which breaks
+        # jax.jit out_shardings. nnx.initializers.zeros is a module-level
+        # singleton, so the kernel_init above is graphdef-stable.
         self.gate_proj = nnx.Linear(
             2 * hidden_size,
             1,
             kernel_init=nnx.initializers.zeros,
-            bias_init=nnx.initializers.constant(gate_init_bias),
             rngs=rngs,
         )
+        self.gate_proj.bias.value = jnp.full_like(self.gate_proj.bias.value, gate_init_bias)
 
     def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray) -> jnp.ndarray:
         if f_gen.shape != f_sem.shape:
