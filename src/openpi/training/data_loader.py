@@ -139,20 +139,45 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    # NOTE: episodes are intentionally NOT passed to LeRobotDataset. With
+    # delta_timestamps set, LeRobotDataset(episodes=subset) re-indexes
+    # episode_data_index to a local 0..N-1 range while dataset rows keep their
+    # global episode_index, so _get_query_indices() indexes out of bounds.
+    # Instead we load the full (self-consistent) dataset and restrict to the
+    # chosen episodes' frames with a Subset; delta_timestamps windows then
+    # still resolve correctly against the full, global episode_data_index.
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
-        # If episodes_index is set, only that subset of episodes is loaded.
-        # Used to hold out validation episodes from training (and vice versa).
-        episodes=list(data_config.episodes_index) if data_config.episodes_index is not None else None,
     )
+
+    episode_frame_subset = None
+    if data_config.episodes_index is not None:
+        episode_frame_subset = _episode_frame_indices(dataset, data_config.episodes_index)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
+    if episode_frame_subset is not None:
+        dataset = torch.utils.data.Subset(dataset, episode_frame_subset)
+
     return dataset
+
+
+def _episode_frame_indices(dataset: lerobot_dataset.LeRobotDataset, episodes: Sequence[int]) -> list[int]:
+    """Global frame indices belonging to the given episodes.
+
+    Uses the full dataset's episode_data_index, which is keyed by global
+    episode index -- consistent with the global episode_index carried on each
+    row and with the precomputed-feature cache layout.
+    """
+    edi = dataset.episode_data_index
+    frames: list[int] = []
+    for ep in episodes:
+        frames.extend(range(int(edi["from"][ep]), int(edi["to"][ep])))
+    return frames
 
 
 def get_num_episodes(repo_id: str) -> int:
