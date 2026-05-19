@@ -12,13 +12,14 @@ import os
 import safetensors.torch
 import torch
 
+from openpi import transforms as _transforms
+from openpi.models import tokenizer as _tokenizer
 from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
-from openpi.models import tokenizer as _tokenizer
-from openpi.policies.b1k_policy import B1kInputs, B1kOutputs
+from openpi.policies.b1k_policy import B1kInputs
+from openpi.policies.b1k_policy import B1kOutputs
 from openpi.policies.policy import Policy
 from openpi.shared import normalize as _normalize
-from openpi import transforms as _transforms
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ def load_b1k_policy(
     if use_vega3d:
         tower_kwargs = dict(vega3d_tower_kwargs or {})
         tower_kwargs.setdefault("output_spatial", 16)
+        if vega3d_tower_name == "dreamdojo":
+            tower_kwargs.setdefault("input_resolution", 256)
     else:
         tower_kwargs = vega3d_tower_kwargs
 
@@ -97,9 +100,7 @@ def load_b1k_policy(
     # B1K checkpoints trained before Phase 3 do not contain P_gen / P_sem / fusion
     # weights. Use strict=False so those randomly-initialized adapters remain
     # (we'll be training them in Phase 4); the rest of the weights still load.
-    missing, unexpected = safetensors.torch.load_model(
-        model, weight_path, strict=not use_vega3d
-    )
+    missing, _unexpected = safetensors.torch.load_model(model, weight_path, strict=not use_vega3d)
     if use_vega3d and missing:
         logger.info(
             "VEGA-3D adapters not in checkpoint (expected for Phase 3): %d missing keys",

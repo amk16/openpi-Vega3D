@@ -1,7 +1,7 @@
 # Phase 6: DreamDojo as Third Generative-Tower Backbone — Full Plan
 
 **Last updated:** 2026-05-12
-**Status:** In progress. Sub-phases 6.0–6.2 complete; 6.3 is next.
+**Status:** Complete. All sub-phases 6.0–6.8 done (offline-validated; online pending checkpoint).
 
 ---
 
@@ -43,12 +43,12 @@ These will be established and justified in `docs/PHASE6_INVESTIGATION.md` (sub-p
 6.0  Investigation               DONE     docs/PHASE6_INVESTIGATION.md
 6.1  Skeleton scaffold            DONE     src/openpi_vega3d/towers/dreamdojo_tower.py
 6.2  Real loader + feat_dim       DONE     dreamdojo_tower.py (replaces scaffold)
-6.3  Null-action forward pass     TODO     dreamdojo_tower.py (real encode())
-6.4  Spatial-grid adaptation      TODO     dreamdojo_tower.py + policy_utils.py
-6.5  TrainConfig integration      TODO     src/openpi/training/config.py
-6.6  Camera-choice config         TODO     src/openpi/training/config.py
-6.7  test_tower.py validation     TODO     scripts/test_tower.py (likely no-op)
-6.8  Documentation + cleanup      TODO     docs/PHASE6_PLAN.md, CHANGELOG, TEST_STATUS
+6.3  Null-text forward pass        DONE     dreamdojo_tower.py (real encode(), offline-validated)
+6.4  Spatial-grid adaptation      DONE     dreamdojo_tower.py + policy_utils.py (offline-validated)
+6.5  TrainConfig integration      DONE     src/openpi/training/config.py (pi05_b1k_dreamdojo)
+6.6  Camera-choice config         DONE     src/openpi/training/config.py (pi05_b1k_dreamdojo_wrist)
+6.7  test_tower.py validation     DONE     scripts/test_tower.py (no changes needed, offline passes)
+6.8  Documentation + cleanup      DONE     docs/ (all updated)
 ```
 
 ### Dependency Graph

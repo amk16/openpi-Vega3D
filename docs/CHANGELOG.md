@@ -5,9 +5,180 @@ Newest phase appears first.
 
 ---
 
+## Known Issues / Tech Debt
+
+### Tower `output_spatial` defaults still 14 (should be 16)
+
+**Problem:** Four of five tower classes default `output_spatial=14` (inherited from VEGA-3D's CLIP ViT-L/14 grid). openpi-Vega3D's downstream requires 16×16 = 256 tokens to match PaliGemma's SigLIP output.
+
+| File | Current Default |
+|------|----------------|
+| `src/openpi_vega3d/towers/vae_online_encoder.py:31` | `14` |
+| `src/openpi_vega3d/towers/wan_t2v_encoder.py:43` | `14` |
+| `src/openpi_vega3d/towers/wan_tower.py:36` | `14` |
+| `src/openpi_vega3d/towers/vae_tower.py:29` | `14` |
+| `src/openpi_vega3d/towers/dreamdojo_tower.py:65` | `16` (correct) |
+
+**Why it works today:** `policy_utils.py:72` injects `output_spatial=16` at runtime via `setdefault`, overriding tower defaults. So the training/inference path is correct.
+
+**Risk:** Anyone instantiating a tower directly (tests, scripts, notebooks) without going through `policy_utils` gets 14×14 = 196 tokens. Fusion with PaliGemma's 256 tokens would silently misalign or error.
+
+**Fix:** Update defaults from `14` → `16` in the four files above. `dreamdojo_tower.py` already correct. Low risk, high clarity.
+
+---
+
 ## Phase 6: DreamDojo as Third Generative-Tower Backbone (2026-05-12)
 
 **Goal**: Register DreamDojo (backed by NVIDIA's Cosmos-Predict2.5-2B-teacher) as a third backbone in TOWER_REGISTRY alongside "vae" and "wan_t2v". Infrastructure-only — adapter training is Phase 7.
+
+### Sub-Phase 6.8 — Documentation + Cleanup (2026-05-19)
+
+**Goal**: Mark all Phase 6 sub-phases as done. Update all living docs with final status.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `docs/PHASE6_PLAN.md` | All 9 sub-phase status markers set to DONE. Top-level status updated to "Complete." |
+| `docs/CHANGELOG.md` | Entries for sub-phases 6.5, 6.6, 6.7, 6.8. |
+| `docs/TEST_STATUS.md` | Test result sections for sub-phases 6.5, 6.6, 6.7, 6.8. |
+
+---
+
+### Sub-Phase 6.7 — test_tower.py Validation (2026-05-19)
+
+**Goal**: Verify existing `scripts/test_tower.py --offline` passes with DreamDojo registered in TOWER_REGISTRY. No script changes needed — the AST-based registry check and diagnostics module pick up the new key automatically.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `scripts/test_tower.py` | No changes. Offline validation passes as-is. |
+
+### Validation
+
+```
+test_tower.py --offline: ALL PASSED (syntax 19/19, ABC contract, registry 3 keys, diagnostics).
+Online test (--tower dreamdojo --checkpoint <path>): PENDING checkpoint.
+```
+
+---
+
+### Sub-Phase 6.6 — Camera-Choice Config (2026-05-19)
+
+**Goal**: Add `pi05_b1k_dreamdojo_wrist` TrainConfig entry applying DreamDojo tower to wrist cameras (`left_wrist_0_rgb`, `right_wrist_0_rgb`). DreamDojo's 44k hours of egocentric human video is a better viewpoint match for wrist cameras than the base camera.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi/training/config.py` | Added `pi05_b1k_dreamdojo_wrist` TrainConfig. Identical to `pi05_b1k_dreamdojo` except `vega3d_cameras=("left_wrist_0_rgb", "right_wrist_0_rgb")` and `project_name="B1K-DreamDojo-Wrist"`. ~100 lines. |
+
+### Key Decisions and Reasoning
+
+1. **Two wrist cameras, not one.** B1K robot has left and right wrist cameras. Both are egocentric viewpoints that match DreamDojo's training distribution. Running the tower twice (once per wrist) doubles forward cost but at 256×256 (not the original 448) this is feasible.
+
+### Validation
+
+```
+get_config('pi05_b1k_dreamdojo_wrist') parses: tower=dreamdojo, cameras=(left_wrist_0_rgb, right_wrist_0_rgb).
+All 34 TrainConfigs parse: no regressions.
+```
+
+---
+
+### Sub-Phase 6.5 — TrainConfig Integration (2026-05-19)
+
+**Goal**: Add `pi05_b1k_dreamdojo` TrainConfig entry mirroring `pi05_b1k_vega3d` but using the DreamDojo backbone. Base camera only — apples-to-apples comparison with the existing VAE adapter.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi/training/config.py` | Added `pi05_b1k_dreamdojo` TrainConfig. Mirrors `pi05_b1k_vega3d` with `vega3d_tower_name="dreamdojo"`, `vega3d_tower_kwargs={"checkpoint_dir": "ckpts/DreamDojo-2B", "variant": "teacher", "input_resolution": 256}`. Same data config, optimizer, freeze filter. ~100 lines. |
+
+### Key Decisions and Reasoning
+
+1. **Same freeze filter as VAE config.** The freeze filter is derived from a vanilla `Pi0Config(pi05=True, ...)` without VEGA-3D, so it freezes the base Pi0 model and leaves adapter params (`P_gen`, `P_sem`, `fusion.*`) trainable. This is correct for both VAE and DreamDojo adapters.
+
+2. **Same training hyperparameters.** 50K steps, lr=1e-4 cosine decay, batch=8. Intentionally identical to the VAE config for fair comparison. Can be tuned in Phase 7.
+
+3. **PI0Pytorch construction + forward/backward smoke test deferred.** Requires GPU + Pi0 checkpoint (~3.5B params). DreamDojo tower would be in offline mode (no checkpoint). Config parse validation is sufficient for Phase 6 scope.
+
+### Validation
+
+```
+get_config('pi05_b1k_dreamdojo') parses: tower=dreamdojo, cameras=base_0_rgb.
+vega3d_tower_kwargs verified: checkpoint_dir, variant, input_resolution all correct.
+All 34 TrainConfigs parse (32 original + 2 new): no regressions, all names unique.
+```
+
+---
+
+### Sub-Phase 6.4 — Spatial-Grid Adaptation (2026-05-19)
+
+**Goal**: Guarantee DreamDojo tower always outputs exactly `[B, 256, feat_dim]` regardless of input image size. Resize input to `input_resolution=256` before VAE encoding so that Cosmos's 16× stride (8× VAE + 2× patchify) yields exactly 16×16 = 256 tokens — matching PaliGemma's SigLIP grid with no pooling needed.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | Added `import torch.nn.functional as F`. Added bilinear `F.interpolate` resize in `encode()` after normalization, before VAE encode. Uses `self._input_resolution` (stored since 6.1 but previously unused). ~8 new lines. |
+| `src/openpi_vega3d/policy_utils.py` | Added DreamDojo-specific `input_resolution=256` default injection via `setdefault` when `vega3d_tower_name == "dreamdojo"`. 2 new lines. |
+
+### Key Decisions and Reasoning
+
+1. **Resize in image space, not latent space.** WAN tower pools in latent space via `adaptive_avg_pool2d` because WAN's encoder wraps the full pipeline and returns `[B, C, H, W]`. DreamDojo encodes through VAE first, so latent grid size is determined by input resolution. Resize before VAE = deterministic token count with no pooling.
+
+2. **No pooling needed at 256×256.** With Cosmos's 8× spatial VAE + 2×2 patchify = 16× total stride, 256/16 = 16 → 16×16 = 256 tokens exactly. This is the cleanest possible alignment with PaliGemma — no `adaptive_avg_pool2d`, no interpolation in latent space.
+
+3. **Explicit `input_resolution` default in policy_utils.** Constructor default is already 256, but injecting it via `setdefault` matches the existing `output_spatial=16` pattern. Prevents silent breakage if constructor default ever changes.
+
+### Validation
+
+```
+8 offline tests PASS: 224x224→[1,256,2048], 256x256→[1,256,2048], 480x480→[1,256,2048],
+  check_output ABC, offline fallback, policy_utils defaults, feat_dim, batch dim.
+test_tower.py --offline: ALL PASSED.
+All 32 TrainConfigs parse: no regressions.
+Online tests (memory < 14GB, timing < 400ms at 256×256): PENDING checkpoint.
+```
+
+---
+
+### Sub-Phase 6.3 — Null-Text Forward Pass (2026-05-19)
+
+**Goal**: Replace dummy `encode()` output with a real forward pass through the frozen Cosmos-Predict2.5-2B transformer. Zero text embeddings, zero action channel, flow-matching noise at timestep 300, feature extraction via forward hook on intermediate DiT block 20 (70% depth).
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | Real `encode()` implementation: VAE encode → zero action channel concat → flow-matching noise → null-text forward → hook capture at block 20. Added shape assert on hook output (`[B, N, feat_dim]`). Added `_get_scheduler()` and `_nearest_timestep()` helpers. Added `_load_vae()` and `_resolve_vae_dir()` for Cosmos VAE loading. ~120 new lines in encode path. |
+
+### Key Decisions and Reasoning
+
+1. **Hook captures `[B, N, C]` sequence format directly — no reshape needed.** Unlike WAN tower which goes through intermediate `[B, C, H, W]` spatial form, Cosmos DiT processes tokens as `[B, THW, C]` after patchify (confirmed in diffusers `transformer_cosmos.py:728`). Hook output is already in the right format for downstream fusion. Spatial adaptation (pooling to `output_spatial`) deferred to 6.4.
+
+2. **Zero action channel (not skipped).** DreamDojo's `in_channels=17` (16 VAE + 1 action) means the patchifier expects 17 input channels. With `concat_padding_mask=True`, internal total is 18 channels → 72-dim patch input. Zeroing the action channel preserves tensor shapes while nullifying action conditioning.
+
+3. **FlowMatchEulerDiscreteScheduler (not UniPC).** Cosmos uses flow-matching Euler, not the UniPC scheduler WAN uses. `scale_noise()` is the correct API for this scheduler (vs WAN's `add_noise()`).
+
+4. **Null-text = zero tensor of shape `[B, 1, 1024]`.** Cosmos-Predict2.5-2B's `text_embed_dim=1024` (confirmed from DCP metadata). Zero text embeddings get projected through `crossattn_proj` (may have bias), resulting in constant but non-zero cross-attention conditioning — acceptable for geometric feature extraction.
+
+5. **Online validation deferred.** DreamDojo checkpoint not fully downloaded (only DCP `.metadata` in HF cache, no weight files). Cosmos VAE not on disk. All tests run in offline mode. Online validation pending checkpoint availability.
+
+### Validation
+
+```
+9 offline tests PASS: registry keys, offline construction, encode shape [2,256,2048],
+  feat_dim=2048, frozen params=0, student/averaged rejection, block_idx validation, online=False.
+test_tower.py --offline: ALL PASSED (syntax 19/19, ABC contract, registry, diagnostics).
+All 32 TrainConfigs parse: no regressions.
+Online tests (shape at real forward, non-degeneracy, dtype, memory, timing): PENDING checkpoint.
+```
+
+---
 
 ### Sub-Phase 6.2 — Real Loader + feat_dim Introspection (2026-05-12)
 
