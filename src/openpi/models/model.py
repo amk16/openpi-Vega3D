@@ -97,6 +97,11 @@ class Observation(Generic[ArrayT]):
     proprio_visibility_mask: at.Float[ArrayT, "*b s"] | None = None
     # Task ID for task-conditioned models (optional).
     task_id: at.Int[ArrayT, "*b"] | None = None
+    # Precomputed spatial-tower features for VEGA-3D adaptive gated fusion, keyed
+    # by camera name. Shape per camera: [*b, n, d] where n must match the SigLIP
+    # token count for that stream and d is the tower's feat_dim. Optional; only
+    # consumed when `use_vega3d` is set in the model config.
+    tower_features: dict[str, at.Float[ArrayT, "*b n d"]] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -128,6 +133,7 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             proprio_visibility_mask=data.get("proprio_visibility_mask"),
             task_id=data.get("task_id"),
+            tower_features=data.get("tower_features"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -154,15 +160,24 @@ def preprocess_observation(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    skip_spatial_aug_cameras: Sequence[str] = (),
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
+
+    ``skip_spatial_aug_cameras`` lists camera keys for which RandomCrop /
+    Resize / Rotate must be skipped (ColorJitter still applies). Required when
+    precomputed VEGA-3D tower features are fused into the camera's SigLIP
+    tokens: the cache was built on un-augmented frames, so a per-step random
+    crop or rotation on SigLIP's input would misregister against the cache and
+    break the token-level gated fusion.
     """
 
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
     batch_shape = observation.state.shape[:-1]
+    skip_spatial = set(skip_spatial_aug_cameras)
 
     out_images = {}
     for key in image_keys:
@@ -176,7 +191,9 @@ def preprocess_observation(
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            # Spatial augmentation only on non-wrist cameras AND only when the
+            # camera is not paired with a precomputed VEGA feature cache.
+            if "wrist" not in key and key not in skip_spatial:
                 height, width = image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),
@@ -207,6 +224,9 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        proprio_visibility_mask=observation.proprio_visibility_mask,
+        task_id=observation.task_id,
+        tower_features=observation.tower_features,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,

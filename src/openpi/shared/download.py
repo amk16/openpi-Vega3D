@@ -9,6 +9,7 @@ import stat
 import subprocess
 import time
 import urllib.parse
+import urllib.request
 
 import filelock
 import fsspec
@@ -89,6 +90,10 @@ def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathl
                 # All other gs:// URLs (e.g. big_vision) continue to use gcsfs as normal.
                 if parsed.scheme == "gs" and parsed.netloc == "openpi-assets":
                     _download_gsutil(url, scratch_path, **kwargs)
+                # gcsfs can fail for anonymous public buckets with newer aiohttp/yarl combinations.
+                # Fall back to direct HTTPS downloads for anon single-file gs:// URLs.
+                elif parsed.scheme == "gs" and kwargs.get("gs", {}).get("token") == "anon":
+                    _download_public_gcs_http(url, scratch_path)
                 else:
                     _download_fsspec(url, scratch_path, **kwargs)
 
@@ -129,6 +134,9 @@ def _download_fsspec(url: str, local_path: pathlib.Path, **kwargs) -> None:
         total_size = fs.du(url)
     else:
         total_size = info["size"]
+    # Ensure destination parent exists for single-file downloads.
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
     with tqdm.tqdm(total=total_size, unit="iB", unit_scale=True, unit_divisor=1024) as pbar:
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(fs.get, url, local_path, recursive=is_dir)
@@ -136,7 +144,28 @@ def _download_fsspec(url: str, local_path: pathlib.Path, **kwargs) -> None:
             current_size = sum(f.stat().st_size for f in [*local_path.rglob("*"), local_path] if f.is_file())
             pbar.update(current_size - pbar.n)
             time.sleep(1)
+        # Re-raise download errors from the worker thread so callers get the real failure.
+        future.result()
         pbar.update(total_size - pbar.n)
+
+
+def _download_public_gcs_http(url: str, local_path: pathlib.Path) -> None:
+    """Download a public gs:// object directly over HTTPS.
+
+    This path intentionally only supports single-file objects.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "gs":
+        raise ValueError(f"Unsupported URL scheme for public GCS download: {url}")
+
+    object_name = parsed.path.strip("/")
+    if not object_name:
+        raise ValueError(f"Expected object path in URL: {url}")
+
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    http_url = f"https://storage.googleapis.com/{parsed.netloc}/{object_name}"
+    with urllib.request.urlopen(http_url) as response, local_path.open("wb") as output_file:
+        shutil.copyfileobj(response, output_file)
 
 
 def _set_permission(path: pathlib.Path, target_permission: int):

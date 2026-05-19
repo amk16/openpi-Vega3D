@@ -80,6 +80,12 @@ class LiberoInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        # Pass through precomputed VEGA-3D tower features when present. They are
+        # attached upstream by LoadPrecomputedTowerFeatures (the Vega data
+        # config); this transform otherwise builds a fresh dict and drops them.
+        if "tower_features" in data:
+            inputs["tower_features"] = data["tower_features"]
+
         return inputs
 
 

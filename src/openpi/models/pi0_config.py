@@ -56,6 +56,18 @@ class Pi0Config(_model.BaseModelConfig):
     # Runtime ablation: force fusion gate to fixed value in [0, 1] (None = learned).
     # 0.0 -> pure generative; 1.0 -> pure semantic.
     vega3d_force_gate: float | None = None
+    # Static feat_dim of the precomputed spatial-tower features. The JAX Pi0
+    # consumes precomputed `observation.tower_features` (the PyTorch tower runs
+    # offline / in the dataloader), so the projection P_gen needs this dim at
+    # init time. Auto-derived from `vega3d_tower_name` in __post_init__ when
+    # left as None.
+    vega3d_tower_feat_dim: int | None = None
+    # When True, do NOT instantiate the PyTorch spatial_tower at model
+    # construction time. Saves ~3GB RAM during precomputed-feature training
+    # runs where observation.tower_features always supplies the features and
+    # the live tower forward path is never taken. Must stay False for any
+    # eval/inference run that needs to compute features live from images.
+    vega3d_skip_tower_construction: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -69,6 +81,17 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.use_vega3d and self.vega3d_tower_feat_dim is None:
+            tower_kwargs = self.vega3d_tower_kwargs or {}
+            if self.vega3d_tower_name == "vae":
+                object.__setattr__(self, "vega3d_tower_feat_dim", 4)
+            elif self.vega3d_tower_name == "wan_t2v":
+                object.__setattr__(self, "vega3d_tower_feat_dim", tower_kwargs.get("feat_dim", 1280))
+            else:
+                raise ValueError(
+                    f"Cannot auto-derive vega3d_tower_feat_dim for tower {self.vega3d_tower_name!r}; "
+                    "set vega3d_tower_feat_dim explicitly."
+                )
 
     @property
     @override
@@ -88,6 +111,21 @@ class Pi0Config(_model.BaseModelConfig):
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
 
+        task_id_spec = jax.ShapeDtypeStruct([batch_size], jnp.int32) if self.num_tasks > 0 else None
+
+        if self.use_vega3d:
+            tower_kwargs = self.vega3d_tower_kwargs or {}
+            output_spatial = tower_kwargs.get("output_spatial", 16)
+            num_spatial_tokens = output_spatial * output_spatial
+            tower_features_spec = {
+                cam: jax.ShapeDtypeStruct(
+                    [batch_size, num_spatial_tokens, self.vega3d_tower_feat_dim], jnp.float32
+                )
+                for cam in self.vega3d_cameras
+            }
+        else:
+            tower_features_spec = None
+
         with at.disable_typechecking():
             observation_spec = _model.Observation(
                 images={
@@ -101,6 +139,8 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                task_id=task_id_spec,
+                tower_features=tower_features_spec,
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )

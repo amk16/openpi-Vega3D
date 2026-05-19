@@ -19,7 +19,7 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
-import openpi.policies.b1k_policy as b1k_policy
+# import openpi.policies.b1k_policy as b1k_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
@@ -392,6 +392,95 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotLiberoVegaDataConfig(LeRobotLiberoDataConfig):
+    """Libero data config that loads precomputed VEGA-3D tower features from disk.
+
+    Mirrors LeRobotLiberoDataConfig but:
+      1. Augments the repack transform to pass episode_index / frame_index
+         through to data_transforms (LeRobot dataset items expose these fields,
+         but the standard libero repack drops them).
+      2. Inserts LoadPrecomputedTowerFeatures at the head of data_transforms.inputs
+         so each item picks up its precomputed features keyed by (episode, frame).
+
+    The cache directory must be populated by scripts/precompute_tower_features.py
+    before training. The JAX model side reads observation.tower_features from
+    the dataloader and raises if absent — there is no live tower fallback in
+    src/openpi/models/pi0.py (the PyTorch model in src/openpi/models_pytorch
+    has one, but the libero training script uses the JAX trainer).
+    """
+
+    tower_features_cache_dir: str = ""
+    tower_features_cameras: tuple[str, ...] = ("base_0_rgb",)
+
+    # Temporal window for WAN feature extraction during precompute. window=1 is
+    # the paper-faithful per-frame extraction (matches VEGA-3D's published code).
+    # window>1 bundles the recent N frames as ONE WAN clip per training frame so
+    # the DiT's cross-frame attention runs, and we keep the *last latent slot*
+    # (causal summary of the window ending at the current frame). This is a
+    # beyond-paper bet; it's the only way to inject temporal/dynamics signal
+    # when the downstream consumer (Pi0.5) is single-frame.
+    #
+    # The model side reads one [num_tokens, feat_dim] vector per training frame
+    # and is invariant to how that vector was computed -- these fields are
+    # record-keeping for the precompute script and to derive the cache path.
+    tower_window: int = 1
+    tower_stride: int = 1
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not self.tower_features_cache_dir:
+            raise ValueError(
+                "LeRobotLiberoVegaDataConfig requires tower_features_cache_dir; "
+                "populate it via scripts/precompute_tower_features.py first."
+            )
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                        # Preserve LeRobot index fields so the precompute-load
+                        # transform downstream can address the cache.
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                _transforms.LoadPrecomputedTowerFeatures(
+                    cache_dir=self.tower_features_cache_dir,
+                    cameras=self.tower_features_cameras,
+                ),
+                libero_policy.LiberoInputs(model_type=model_config.model_type),
+            ],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -498,49 +587,49 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         )
 
 
-@dataclasses.dataclass(frozen=True)
-class LeRobotB1KDataConfig(DataConfigFactory):
-    """Factory that wires B1K-specific transforms into the data pipeline.
+# @dataclasses.dataclass(frozen=True)
+# class LeRobotB1KDataConfig(DataConfigFactory):
+#     """Factory that wires B1K-specific transforms into the data pipeline.
 
-    Turns raw LeRobot B1K demo data into the format B1kInputs expects:
-    camera images -> uint8 HWC, state -> 23-dim from 256-dim proprio, task_index -> task_id.
-    """
+#     Turns raw LeRobot B1K demo data into the format B1kInputs expects:
+#     camera images -> uint8 HWC, state -> 23-dim from 256-dim proprio, task_index -> task_id.
+#     """
 
-    action_sequence_keys: Sequence[str] = ("action",)
+#     action_sequence_keys: Sequence[str] = ("action",)
 
-    @override
-    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/egocentric_camera": "observation.images.rgb.head",
-                        "observation/wrist_image_left": "observation.images.rgb.left_wrist",
-                        "observation/wrist_image_right": "observation.images.rgb.right_wrist",
-                        "observation/state": "observation.state",
-                        "actions": "action",
-                        "prompt": "prompt",
-                        "task_index": "task_index",
-                    }
-                )
-            ]
-        )
+#     @override
+#     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+#         repack_transform = _transforms.Group(
+#             inputs=[
+#                 _transforms.RepackTransform(
+#                     {
+#                         "observation/egocentric_camera": "observation.images.rgb.head",
+#                         "observation/wrist_image_left": "observation.images.rgb.left_wrist",
+#                         "observation/wrist_image_right": "observation.images.rgb.right_wrist",
+#                         "observation/state": "observation.state",
+#                         "actions": "action",
+#                         "prompt": "prompt",
+#                         "task_index": "task_index",
+#                     }
+#                 )
+#             ]
+#         )
 
-        data_transforms = _transforms.Group(
-            inputs=[b1k_policy.B1kInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
-            outputs=[b1k_policy.B1kOutputs(action_dim=23)],
-        )
+#         data_transforms = _transforms.Group(
+#             inputs=[b1k_policy.B1kInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+#             outputs=[b1k_policy.B1kOutputs(action_dim=23)],
+#         )
 
-        model_transforms = ModelTransformFactory()(model_config)
+#         model_transforms = ModelTransformFactory()(model_config)
 
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=repack_transform,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-            action_sequence_keys=self.action_sequence_keys,
-            use_quantile_norm=True,
-        )
+#         return dataclasses.replace(
+#             self.create_base_config(assets_dirs, model_config),
+#             repack_transforms=repack_transform,
+#             data_transforms=data_transforms,
+#             model_transforms=model_transforms,
+#             action_sequence_keys=self.action_sequence_keys,
+#             use_quantile_norm=True,
+#         )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -598,6 +687,15 @@ class TrainConfig:
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
+    # If set, checkpoints are uploaded to this S3 bucket during training. Every
+    # checkpoint except the most recent is uploaded in a background thread and
+    # then deleted from local disk once the upload succeeds; the newest is
+    # always kept on disk for resume/eval. If None, no S3 upload happens.
+    s3_checkpoint_bucket: str | None = None
+    # Key prefix within the bucket. Checkpoints are uploaded to
+    # s3://<bucket>/<prefix>/<config name>/<exp_name>/<step>/.
+    s3_checkpoint_prefix: str = "openpi_checkpoints"
+
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
     # If true, will resume training from the last checkpoint.
@@ -615,14 +713,15 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
-    # How often (in steps) to log validation metrics.
-    val_log_interval: int = 100
+    # How often (in steps) to run validation. If None, syncs to save_interval.
+    val_log_interval: int | None = None
     # Validation batch size (optional, defaults to batch_size if not set).
     val_batch_size: int | None = None
     # Number of validation batches to average for validation loss.
     val_num_batches: int = 10
     # Optionally, repo_id for validation set (if different from train).
     val_repo_id: str | None = None
+    # Episode indices held out for validation. If None, validation is disabled.
     val_episodes_index: list[int] | None = None
 
     @property
@@ -852,6 +951,220 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_libero_lora",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            # normalization_stats_path="assets/pi05_libero/physical-intelligence/libero/norm_stats.json",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Same held-out validation split and S3 checkpoint streaming as the
+        # WAN variant, so the baseline and WAN runs are directly comparable.
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # WAN tower in-process: dropped from 64 to 8 to fit on a single 48GB GPU.
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+                # Paper Implementation Details: "extract features at k=300 from
+                # the 20th DiT layer." Matches VEGA-3D/scripts/3d/train/
+                # train_wan_t2v_online.sh:119 (--generative_vision_tower_feat_block_idx 20).
+                # The encoder default of -1 (last layer) is the layer the paper's
+                # own ablation (Fig 7b) identifies as worst -- pixel-level
+                # rendering with weak abstraction.
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+            # Tower stays out of RAM during training; precomputed features
+            # supply the generative stream. Eval configs must NOT set this.
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            # Multi-frame causal window: each training frame's WAN feature is
+            # computed from a [f-32, f-30, ..., f-2, f] clip (17 frames, stride 2,
+            # covers ~33 frames of motion at 20Hz). The cache stores the *last
+            # latent slot* per training frame so the schema matches single-frame.
+            # Path includes the variant tag so different (window, stride, block)
+            # caches don't collide.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # No WAN in-process: same batch budget as the non-VEGA libero run.
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            # 1e-5 is conservative for batch 64: the validated pi05_libero
+            # full-finetune uses peak_lr=5e-5 at batch 256 (~1.2e-5 when
+            # batch-scaled down to 64). The global LR is capped by SigLIP,
+            # which get_freeze_filter() leaves fully unfrozen -- a
+            # LoRA-magnitude LR (1e-4+) would over-train the pretrained tower.
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Hold out 85 episodes (every 20th) as the validation set. The stride
+        # keeps all ~34 LIBERO tasks represented in training -- a contiguous
+        # range would pull whole tasks out. Edit this list to pick your own.
+        val_episodes_index=list(range(0, 1693, 20)),
+        # Stream checkpoints to S3; keep only the newest on local disk.
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    # Control for the WAN ablation. Identical to pi05_libero_lora_wan_precomp --
+    # same P_gen / P_sem / fusion architecture, same precomputed-feature data
+    # pipeline, same hyperparameters and val split -- except vega3d_force_gate
+    # pins the fusion gate to 1.0, so the generative (WAN) stream is gated out
+    # entirely. vs pi05_libero_lora_wan_precomp this isolates the WAN
+    # contribution with architecture held fixed; vs pi05_libero_lora it isolates
+    # the cost/benefit of the extra P_sem projection.
+    TrainConfig(
+        name="pi05_libero_lora_wan_precomp_semonly",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+                # Same block as the WAN run -- ablation isolates the gate, not
+                # the extraction layer.
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+            vega3d_skip_tower_construction=True,
+            # Pin the fusion gate to pure-semantic: fused = f_sem. The WAN
+            # stream contributes nothing and P_gen receives no gradient.
+            vega3d_force_gate=1.0,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            # Identical cache as the WAN run -- ablation must use the *same*
+            # features so the only varying knob is the gate. The features get
+            # multiplied by (1-g)=0 anyway, so we just need a valid cache.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
     #
     # Fine-tuning Aloha configs.
     #
@@ -1024,103 +1337,103 @@ _CONFIGS = [
     #
     # B1K + VEGA-3D adapter training config.
     #
-    TrainConfig(
-        name="pi05_b1k_vega3d",
-        exp_name="openpi",
-        project_name="B1K-VEGA3D",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=128,
-            paligemma_variant="gemma_2b_lora_32",
-            loss_weighting_strategy="per_group",
-            action_groups={
-                "base": (0, 3),
-                "trunk": (3, 7),
-                "left_arm": (7, 14),
-                "left_gripper": (14, 15),
-                "right_arm": (15, 22),
-                "right_gripper": (22, 23),
-                "padding": (23, 32),
-            },
-            group_weights={
-                "base": 1.0,
-                "trunk": 1.7,
-                "left_arm": 2.0,
-                "left_gripper": 2.0,
-                "right_arm": 2.0,
-                "right_gripper": 2.0,
-                "padding": 0.0,
-            },
-            proprio_dropout_dropout_whole_proprio_pct=0.2,
-            num_tasks=50,
-            task_embedding_scale=1.5,
-            use_vega3d=True,
-            vega3d_tower_name="vae",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "ckpts/stable-diffusion-2-1-base",
-            },
-            vega3d_cameras=("base_0_rgb",),
-            vega3d_force_gate=None,
-        ),
-        data=LeRobotB1KDataConfig(
-            repo_id="behavior-1k/2025-challenge-demos",
-            base_config=DataConfig(
-                tasks=[
-                    "assembling_gift_baskets",
-                    "bringing_in_wood",
-                    "carrying_in_groceries",
-                    "chop_an_onion",
-                    "chopping_wood",
-                    "clean_a_patio",
-                    "cleaning_up_plates_and_food",
-                    "clearing_food_from_table_into_fridge",
-                    "hanging_pictures",
-                    "hiding_Easter_eggs",
-                    "loading_the_car",
-                    "make_microwave_popcorn",
-                    "make_pizza",
-                    "moving_boxes_to_storage",
-                    "picking_up_trash",
-                    "putting_away_Halloween_decorations",
-                    "putting_shoes_on_rack",
-                    "rearranging_kitchen_furniture",
-                    "setting_the_fire",
-                    "spraying_for_bugs",
-                    "spraying_fruit_trees",
-                    "turning_on_radio",
-                ],
-                prompt_from_task=False,
-                prompt_from_skill_annotations=True,
-                prompt_from_skill_annotations_use_base_prompt_pct=0.7,
-                proprio_dropout_dropout_whole_proprio_pct=0.1,
-                episodes_index=list(range(190)),
-                boundary_oversampling_factor=2,
-                boundary_window_frames=30,
-                behavior_dataset_root=None,
-            ),
-        ),
-        pytorch_weight_path="/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor",
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=128,
-            paligemma_variant="gemma_2b_lora_32",
-        ).get_freeze_filter(),
-        num_train_steps=50_000,
-        batch_size=8,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=1e-4,
-            decay_steps=50_000,
-            decay_lr=1e-6,
-        ),
-        ema_decay=None,
-        val_log_interval=2500,
-        val_repo_id="behavior-1k/2025-challenge-demos",
-        val_episodes_index=list(range(190, 200)),
-        assets_base_dir="./outputs/assets",
-        checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=min(32, os.cpu_count() - 2),
-    ),
+    # TrainConfig(
+    #     name="pi05_b1k_vega3d",
+    #     exp_name="openpi",
+    #     project_name="B1K-VEGA3D",
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #         loss_weighting_strategy="per_group",
+    #         action_groups={
+    #             "base": (0, 3),
+    #             "trunk": (3, 7),
+    #             "left_arm": (7, 14),
+    #             "left_gripper": (14, 15),
+    #             "right_arm": (15, 22),
+    #             "right_gripper": (22, 23),
+    #             "padding": (23, 32),
+    #         },
+    #         group_weights={
+    #             "base": 1.0,
+    #             "trunk": 1.7,
+    #             "left_arm": 2.0,
+    #             "left_gripper": 2.0,
+    #             "right_arm": 2.0,
+    #             "right_gripper": 2.0,
+    #             "padding": 0.0,
+    #         },
+    #         proprio_dropout_dropout_whole_proprio_pct=0.2,
+    #         num_tasks=50,
+    #         task_embedding_scale=1.5,
+    #         use_vega3d=True,
+    #         vega3d_tower_name="vae",
+    #         vega3d_tower_kwargs={
+    #             "checkpoint_dir": "ckpts/stable-diffusion-2-1-base",
+    #         },
+    #         vega3d_cameras=("base_0_rgb",),
+    #         vega3d_force_gate=None,
+    #     ),
+    #     data=LeRobotB1KDataConfig(
+    #         repo_id="behavior-1k/2025-challenge-demos",
+    #         base_config=DataConfig(
+    #             tasks=[
+    #                 "assembling_gift_baskets",
+    #                 "bringing_in_wood",
+    #                 "carrying_in_groceries",
+    #                 "chop_an_onion",
+    #                 "chopping_wood",
+    #                 "clean_a_patio",
+    #                 "cleaning_up_plates_and_food",
+    #                 "clearing_food_from_table_into_fridge",
+    #                 "hanging_pictures",
+    #                 "hiding_Easter_eggs",
+    #                 "loading_the_car",
+    #                 "make_microwave_popcorn",
+    #                 "make_pizza",
+    #                 "moving_boxes_to_storage",
+    #                 "picking_up_trash",
+    #                 "putting_away_Halloween_decorations",
+    #                 "putting_shoes_on_rack",
+    #                 "rearranging_kitchen_furniture",
+    #                 "setting_the_fire",
+    #                 "spraying_for_bugs",
+    #                 "spraying_fruit_trees",
+    #                 "turning_on_radio",
+    #             ],
+    #             prompt_from_task=False,
+    #             prompt_from_skill_annotations=True,
+    #             prompt_from_skill_annotations_use_base_prompt_pct=0.7,
+    #             proprio_dropout_dropout_whole_proprio_pct=0.1,
+    #             episodes_index=list(range(190)),
+    #             boundary_oversampling_factor=2,
+    #             boundary_window_frames=30,
+    #             behavior_dataset_root=None,
+    #         ),
+    #     ),
+    #     pytorch_weight_path="/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor",
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #     ).get_freeze_filter(),
+    #     num_train_steps=50_000,
+    #     batch_size=8,
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=1e-4,
+    #         decay_steps=50_000,
+    #         decay_lr=1e-6,
+    #     ),
+    #     ema_decay=None,
+    #     val_log_interval=2500,
+    #     val_repo_id="behavior-1k/2025-challenge-demos",
+    #     val_episodes_index=list(range(190, 200)),
+    #     assets_base_dir="./outputs/assets",
+    #     checkpoint_base_dir="./outputs/checkpoints",
+    #     num_workers=min(32, os.cpu_count() - 2),
+    # ),
     #
     # B1K + DreamDojo (Cosmos-Predict2.5-2B) adapter training config.
     # Mirrors pi05_b1k_vega3d but uses the DreamDojo backbone for generative features.

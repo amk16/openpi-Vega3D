@@ -16,8 +16,7 @@ from openpi import transforms as _transforms
 from openpi.models import tokenizer as _tokenizer
 from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
-from openpi.policies.b1k_policy import B1kInputs
-from openpi.policies.b1k_policy import B1kOutputs
+# from openpi.policies.b1k_policy import B1kInputs, B1kOutputs
 from openpi.policies.policy import Policy
 from openpi.shared import normalize as _normalize
 

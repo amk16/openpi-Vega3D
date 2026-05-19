@@ -26,13 +26,27 @@ class AdaptiveGatedFusion(nn.Module):
     the same spatial location as token i in F_sem.
     """
 
-    def __init__(self, hidden_size: int, force_gate: float | None = None):
+    def __init__(
+        self,
+        hidden_size: int,
+        force_gate: float | None = None,
+        gate_init_bias: float = 4.0,
+    ):
         """
         Args:
             hidden_size: Feature dimension of both streams (D_llm).
             force_gate: If not None, overrides the learned gate with this fixed
                 value in [0, 1] at every position -- used for inference-time
                 ablation (e.g. 1.0 => pure semantic, 0.0 => pure generative).
+            gate_init_bias: Initial bias of the gate projection. The gate weight
+                is zero-initialized, so at step 0 the gate is the constant
+                sigmoid(gate_init_bias) at every position regardless of input.
+                The positive default (4.0 -> g ~= 0.982) makes the fused output
+                start as ~pure F_sem, i.e. vanilla pi05 behavior, so the
+                random-init P_gen does not perturb the pretrained model before
+                training has had a chance to adapt it. Gradient still flows to
+                the gate weight (dg/dW = g(1-g)*concat != 0), so the generative
+                stream ramps in as training progresses.
         """
         super().__init__()
         if force_gate is not None and not 0.0 <= force_gate <= 1.0:
@@ -42,6 +56,9 @@ class AdaptiveGatedFusion(nn.Module):
         self.ln_gen = nn.LayerNorm(hidden_size)
         self.ln_sem = nn.LayerNorm(hidden_size)
         self.gate_proj = nn.Linear(2 * hidden_size, 1)  # W_g and b_g baked in
+        # Bias the gate toward the semantic stream at init (see gate_init_bias).
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.constant_(self.gate_proj.bias, gate_init_bias)
 
     def forward(self, F_gen: torch.Tensor, F_sem: torch.Tensor) -> torch.Tensor:
         if F_gen.shape != F_sem.shape:

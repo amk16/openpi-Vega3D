@@ -50,8 +50,10 @@ class CheckpointWeightLoader(WeightLoader):
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Backfill weights absent from base checkpoints so they keep their fresh
+        # init from model construction: LoRA adapters, and the VEGA-3D fusion
+        # modules (P_gen / P_sem / fusion) which are new top-level modules.
+        return _merge_params(loaded_params, params, missing_regex=r".*lora.*|(P_gen|P_sem|fusion)/.*")
 
 
 @dataclasses.dataclass(frozen=True)

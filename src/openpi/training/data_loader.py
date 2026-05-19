@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
 import logging
 import multiprocessing
 import os
@@ -138,6 +139,13 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    # NOTE: episodes are intentionally NOT passed to LeRobotDataset. With
+    # delta_timestamps set, LeRobotDataset(episodes=subset) re-indexes
+    # episode_data_index to a local 0..N-1 range while dataset rows keep their
+    # global episode_index, so _get_query_indices() indexes out of bounds.
+    # Instead we load the full (self-consistent) dataset and restrict to the
+    # chosen episodes' frames with a Subset; delta_timestamps windows then
+    # still resolve correctly against the full, global episode_data_index.
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
@@ -145,10 +153,36 @@ def create_torch_dataset(
         },
     )
 
+    episode_frame_subset = None
+    if data_config.episodes_index is not None:
+        episode_frame_subset = _episode_frame_indices(dataset, data_config.episodes_index)
+
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
+    if episode_frame_subset is not None:
+        dataset = torch.utils.data.Subset(dataset, episode_frame_subset)
+
     return dataset
+
+
+def _episode_frame_indices(dataset: lerobot_dataset.LeRobotDataset, episodes: Sequence[int]) -> list[int]:
+    """Global frame indices belonging to the given episodes.
+
+    Uses the full dataset's episode_data_index, which is keyed by global
+    episode index -- consistent with the global episode_index carried on each
+    row and with the precomputed-feature cache layout.
+    """
+    edi = dataset.episode_data_index
+    frames: list[int] = []
+    for ep in episodes:
+        frames.extend(range(int(edi["from"][ep]), int(edi["to"][ep])))
+    return frames
+
+
+def get_num_episodes(repo_id: str) -> int:
+    """Return the total number of episodes in a LeRobot dataset repo."""
+    return int(lerobot_dataset.LeRobotDatasetMetadata(repo_id).total_episodes)
 
 
 def create_rlds_dataset(
@@ -228,6 +262,10 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
+    episodes_index: list[int] | None = None,
+    repo_id: str | None = None,
+    batch_size: int | None = None,
+    shuffle_seed: int | None = None,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -238,15 +276,32 @@ def create_data_loader(
         num_batches: Determines the number of batches to return.
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
+        episodes_index: If set, overrides data_config.episodes_index so only
+            this subset of episodes is loaded (used for the train/val split).
+        repo_id: If set, overrides the dataset repo id (used for a separate
+            validation dataset).
+        batch_size: If set, overrides config.batch_size (used for validation).
+        shuffle_seed: If set, the dataset is wrapped in a fixed seeded
+            permutation. Combined with num_batches this yields a representative
+            sample that is identical on every pass -- needed for a comparable
+            validation-loss curve.
     """
     data_config = config.data.create(config.assets_dirs, config.model)
+    overrides: dict = {}
+    if episodes_index is not None:
+        overrides["episodes_index"] = list(episodes_index)
+    if repo_id is not None:
+        overrides["repo_id"] = repo_id
+    if overrides:
+        data_config = dataclasses.replace(data_config, **overrides)
+    effective_batch_size = batch_size if batch_size is not None else config.batch_size
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
-            batch_size=config.batch_size,
+            batch_size=effective_batch_size,
             sharding=sharding,
             shuffle=shuffle,
             num_batches=num_batches,
@@ -257,7 +312,7 @@ def create_data_loader(
         data_config,
         model_config=config.model,
         action_horizon=config.model.action_horizon,
-        batch_size=config.batch_size,
+        batch_size=effective_batch_size,
         sharding=sharding,
         shuffle=shuffle,
         num_batches=num_batches,
@@ -265,6 +320,7 @@ def create_data_loader(
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
         framework=framework,
+        shuffle_seed=shuffle_seed,
     )
 
 
@@ -281,6 +337,7 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
+    shuffle_seed: int | None = None,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -301,6 +358,14 @@ def create_torch_data_loader(
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+
+    if shuffle_seed is not None:
+        # Wrap in a fixed seeded permutation so a capped iteration
+        # (num_batches) samples representatively across all episodes and is
+        # identical on every pass -- needed for a comparable validation-loss
+        # curve. The loader itself then runs with shuffle=False.
+        perm = np.random.RandomState(shuffle_seed).permutation(len(dataset)).tolist()
+        dataset = torch.utils.data.Subset(dataset, perm)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

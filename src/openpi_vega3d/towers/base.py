@@ -38,6 +38,34 @@ class BaseTower(nn.Module, ABC):
     def forward(self, images: Tensor) -> Tensor:
         return self.encode(images)
 
+    def encode_window_batch(self, clips: Tensor, noise_seed: int | None = None) -> Tensor:
+        """Multi-frame interface used by precompute. Default fallback: this
+        base class assumes single-frame towers (no temporal axis). It accepts
+        the 5D shape used in multi-frame mode but errors on window>1 so
+        callers don't silently lose the temporal axis.
+
+        Subclasses with real multi-frame support (e.g. WanT2VTower) override.
+
+        Args:
+            clips: [B, T, 3, H, W].
+            noise_seed: ignored by the fallback.
+
+        Returns:
+            [B, num_tokens, feat_dim] features of the LAST frame in each clip
+            (the "current" frame at index T-1). Equivalent to ``encode`` of the
+            last frame when T == 1.
+        """
+        if clips.ndim != 5:
+            raise ValueError(f"Expected [B, T, 3, H, W], got {tuple(clips.shape)}")
+        b, t = clips.shape[:2]
+        if t > 1:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement multi-frame encoding. "
+                "Either pass --window 1 to scripts/precompute_tower_features.py "
+                "or override encode_window_batch on this tower."
+            )
+        return self.encode(clips[:, 0])
+
     def freeze(self) -> None:
         self.eval()
         for p in self.parameters():

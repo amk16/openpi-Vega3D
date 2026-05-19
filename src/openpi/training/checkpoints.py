@@ -4,6 +4,9 @@ import asyncio
 import concurrent.futures as futures
 import dataclasses
 import logging
+import shutil
+import subprocess
+import threading
 from typing import Protocol
 
 from etils import epath
@@ -18,7 +21,12 @@ import openpi.training.utils as training_utils
 
 
 def initialize_checkpoint_dir(
-    checkpoint_dir: epath.Path | str, *, keep_period: int | None, overwrite: bool, resume: bool
+    checkpoint_dir: epath.Path | str,
+    *,
+    keep_period: int | None,
+    overwrite: bool,
+    resume: bool,
+    keep_all: bool = False,
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
@@ -45,8 +53,12 @@ def initialize_checkpoint_dir(
             "params": ocp.PyTreeCheckpointHandler(),
         },
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=1,
-            keep_period=keep_period,
+            # keep_all is used when an external uploader (S3CheckpointSync) owns
+            # local-disk pruning: orbax must not garbage-collect checkpoints out
+            # from under an in-flight upload, so it keeps every checkpoint and
+            # the uploader is the sole deleter.
+            max_to_keep=None if keep_all else 1,
+            keep_period=None if keep_all else keep_period,
             create=False,
             async_options=ocp.AsyncOptions(timeout_secs=7200),
         ),
@@ -157,3 +169,94 @@ def _merge_params(train_state: training_utils.TrainState, params: dict[str, at.P
     if train_state.params:
         return dataclasses.replace(train_state, ema_params=params["params"])
     return dataclasses.replace(train_state, params=params["params"])
+
+
+class S3CheckpointSync:
+    """Streams checkpoints to S3 in the background, keeping only the newest on disk.
+
+    After each save, every checkpoint older than the latest is uploaded to S3 in
+    a background thread; once an upload succeeds the local copy is deleted. The
+    newest checkpoint is always kept on local disk so training can resume or be
+    evaluated from it. A checkpoint is never deleted locally before its upload
+    has completed successfully -- a failed upload is logged and retried on the
+    next save. Checkpoints land at ``s3://<bucket>/<prefix>/<step>/``.
+
+    Use together with ``initialize_checkpoint_dir(..., keep_all=True)`` so orbax
+    does not garbage-collect a checkpoint while its upload is in flight.
+    """
+
+    def __init__(self, *, checkpoint_dir: epath.Path | str, bucket: str, prefix: str):
+        self._checkpoint_dir = epath.Path(checkpoint_dir)
+        self._bucket = bucket
+        self._prefix = prefix.strip("/")
+        # Single worker: uploads run sequentially, bounding disk usage and
+        # network contention while still being off the training thread.
+        self._executor = futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="s3-ckpt")
+        self._lock = threading.Lock()
+        self._inflight: set[int] = set()
+        self._uploaded: set[int] = set()
+
+    def _s3_uri(self, step: int) -> str:
+        return f"s3://{self._bucket}/{self._prefix}/{step}"
+
+    def _local_steps(self) -> list[int]:
+        """Committed checkpoint steps currently on local disk, sorted ascending."""
+        steps = []
+        for path in self._checkpoint_dir.iterdir():
+            # orbax names a fully committed checkpoint with the bare step int;
+            # an in-progress one carries a ``.orbax-checkpoint-tmp-*`` suffix.
+            if path.is_dir() and path.name.isdigit():
+                steps.append(int(path.name))
+        return sorted(steps)
+
+    def after_save(self, latest_step: int) -> None:
+        """Queue a background upload+prune for every checkpoint older than latest_step."""
+        for step in self._local_steps():
+            if step >= latest_step:
+                continue  # never touch the newest checkpoint -- it stays on disk
+            with self._lock:
+                if step in self._inflight or step in self._uploaded:
+                    continue
+                self._inflight.add(step)
+            self._executor.submit(self._upload, step, delete=True)
+
+    def upload_final(self, step: int) -> None:
+        """Upload the newest checkpoint to S3 synchronously, keeping it on disk."""
+        with self._lock:
+            if step in self._uploaded or step in self._inflight:
+                return
+            self._inflight.add(step)
+        self._upload(step, delete=False)
+
+    def _upload(self, step: int, *, delete: bool) -> None:
+        local = self._checkpoint_dir / str(step)
+        try:
+            if not local.exists():
+                logging.warning(f"[s3-ckpt] checkpoint {step} not on disk; skipping upload")
+                return
+            uri = self._s3_uri(step)
+            logging.info(f"[s3-ckpt] uploading checkpoint {step} -> {uri}")
+            subprocess.run(
+                ["aws", "s3", "sync", "--no-progress", str(local), uri],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            with self._lock:
+                self._uploaded.add(step)
+            logging.info(f"[s3-ckpt] upload of checkpoint {step} complete")
+            if delete:
+                # Delete locally only after a verified successful upload.
+                shutil.rmtree(str(local))
+                logging.info(f"[s3-ckpt] pruned local checkpoint {step}")
+        except subprocess.CalledProcessError as exc:
+            logging.error(f"[s3-ckpt] upload of checkpoint {step} failed (will retry): {exc.stderr}")
+        except Exception as exc:  # noqa: BLE001
+            logging.error(f"[s3-ckpt] error handling checkpoint {step}: {exc!r}")
+        finally:
+            with self._lock:
+                self._inflight.discard(step)
+
+    def wait(self) -> None:
+        """Block until all queued uploads finish (call once at end of training)."""
+        self._executor.shutdown(wait=True)
