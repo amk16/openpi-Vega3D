@@ -81,3 +81,22 @@ class WanT2VTower(BaseTower):
         assert feats.ndim == 4, f"Expected [B,C,H,W] from encoder, got {tuple(feats.shape)}"
         b, c, h, w = feats.shape
         return feats.permute(0, 2, 3, 1).reshape(b, h * w, c)
+
+    def encode_window_batch(
+        self,
+        clips: Tensor,
+        noise_seed: int | None = None,
+    ) -> Tensor:
+        """Multi-frame encode: one clip per batch item; returns last-latent-slot
+        spatial tokens. See `WanT2VOnlineEncoder._forward_window_batch`.
+
+        Args:
+            clips: [B, T, 3, H, W]. Each batch item is a temporal window of T
+                frames ending at the "current" frame at index T-1; cross-frame
+                attention runs *within* the clip.
+            noise_seed: optional int for deterministic noise (reproducible cache).
+
+        Returns:
+            [B, output_spatial**2, feat_dim] — same layout as `encode`.
+        """
+        return self.encoder._forward_window_batch(clips, device=clips.device, noise_seed=noise_seed)

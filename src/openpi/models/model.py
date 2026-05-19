@@ -160,15 +160,24 @@ def preprocess_observation(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    skip_spatial_aug_cameras: Sequence[str] = (),
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
+
+    ``skip_spatial_aug_cameras`` lists camera keys for which RandomCrop /
+    Resize / Rotate must be skipped (ColorJitter still applies). Required when
+    precomputed VEGA-3D tower features are fused into the camera's SigLIP
+    tokens: the cache was built on un-augmented frames, so a per-step random
+    crop or rotation on SigLIP's input would misregister against the cache and
+    break the token-level gated fusion.
     """
 
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
     batch_shape = observation.state.shape[:-1]
+    skip_spatial = set(skip_spatial_aug_cameras)
 
     out_images = {}
     for key in image_keys:
@@ -182,7 +191,9 @@ def preprocess_observation(
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            # Spatial augmentation only on non-wrist cameras AND only when the
+            # camera is not paired with a precomputed VEGA feature cache.
+            if "wrist" not in key and key not in skip_spatial:
                 height, width = image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),

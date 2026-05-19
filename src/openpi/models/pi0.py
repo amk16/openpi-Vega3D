@@ -269,7 +269,17 @@ class Pi0(_model.BaseModel):
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        # Skip spatial augmentation (RandomCrop / Resize / Rotate) on cameras
+        # whose SigLIP tokens get fused with precomputed VEGA-3D features --
+        # otherwise per-step random crops/rotations misregister against the
+        # cached f_gen and break the token-level gated fusion. ColorJitter
+        # still applies (no spatial effect).
+        observation = _model.preprocess_observation(
+            preprocess_rng,
+            observation,
+            train=train,
+            skip_spatial_aug_cameras=self._spatial_cameras if self.use_vega3d else (),
+        )
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)

@@ -403,13 +403,28 @@ class LeRobotLiberoVegaDataConfig(LeRobotLiberoDataConfig):
          so each item picks up its precomputed features keyed by (episode, frame).
 
     The cache directory must be populated by scripts/precompute_tower_features.py
-    before training. The model side is unchanged — _fuse_camera consumes
-    observation.tower_features when present and falls back to live tower encode
-    when absent (eval/rollout path).
+    before training. The JAX model side reads observation.tower_features from
+    the dataloader and raises if absent — there is no live tower fallback in
+    src/openpi/models/pi0.py (the PyTorch model in src/openpi/models_pytorch
+    has one, but the libero training script uses the JAX trainer).
     """
 
     tower_features_cache_dir: str = ""
     tower_features_cameras: tuple[str, ...] = ("base_0_rgb",)
+
+    # Temporal window for WAN feature extraction during precompute. window=1 is
+    # the paper-faithful per-frame extraction (matches VEGA-3D's published code).
+    # window>1 bundles the recent N frames as ONE WAN clip per training frame so
+    # the DiT's cross-frame attention runs, and we keep the *last latent slot*
+    # (causal summary of the window ending at the current frame). This is a
+    # beyond-paper bet; it's the only way to inject temporal/dynamics signal
+    # when the downstream consumer (Pi0.5) is single-frame.
+    #
+    # The model side reads one [num_tokens, feat_dim] vector per training frame
+    # and is invariant to how that vector was computed -- these fields are
+    # record-keeping for the precompute script and to derive the cache path.
+    tower_window: int = 1
+    tower_stride: int = 1
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -1024,6 +1039,13 @@ _CONFIGS = [
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
                 "output_spatial": 16,
+                # Paper Implementation Details: "extract features at k=300 from
+                # the 20th DiT layer." Matches VEGA-3D/scripts/3d/train/
+                # train_wan_t2v_online.sh:119 (--generative_vision_tower_feat_block_idx 20).
+                # The encoder default of -1 (last layer) is the layer the paper's
+                # own ablation (Fig 7b) identifies as worst -- pixel-level
+                # rendering with weak abstraction.
+                "feat_block_idx": 20,
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
@@ -1039,8 +1061,16 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536",
+            # Multi-frame causal window: each training frame's WAN feature is
+            # computed from a [f-32, f-30, ..., f-2, f] clip (17 frames, stride 2,
+            # covers ~33 frames of motion at 20Hz). The cache stores the *last
+            # latent slot* per training frame so the schema matches single-frame.
+            # Path includes the variant tag so different (window, stride, block)
+            # caches don't collide.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
@@ -1090,6 +1120,9 @@ _CONFIGS = [
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
                 "output_spatial": 16,
+                # Same block as the WAN run -- ablation isolates the gate, not
+                # the extraction layer.
+                "feat_block_idx": 20,
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
@@ -1106,8 +1139,13 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536",
+            # Identical cache as the WAN run -- ablation must use the *same*
+            # features so the only varying knob is the gate. The features get
+            # multiplied by (1-g)=0 anyway, so we just need a valid cache.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,

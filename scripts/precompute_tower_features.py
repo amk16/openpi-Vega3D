@@ -1,8 +1,12 @@
 """Precompute VEGA-3D tower features for all frames in a LeRobot dataset.
 
 Iterates the dataset referenced by a TrainConfig, runs the configured spatial
-tower (VAE or WAN-T2V) over the camera images, and writes per-episode
-safetensors.
+tower (VAE or WAN-T2V) over a temporal window of frames ending at each training
+frame, and writes per-episode safetensors. Single-frame mode (window=1) gives
+paper-faithful per-frame extraction; window>1 bundles the window as ONE WAN
+clip so the DiT's cross-frame attention actually runs, and we keep the last
+latent slot (causal summary of the recent past at the training frame). The
+output cache shape is identical in both modes -- only the input changes.
 
 To survive limited local disk, the script works in an embed -> upload -> delete
 loop: it computes features locally, periodically uploads completed episodes to
@@ -20,9 +24,13 @@ Cache layout (identical local staging dir and S3 prefix):
             ...
 
 Usage:
-    python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp
+    # Single-frame (paper-faithful):
+    python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp --window 1
+
+    # Multi-frame window (beyond-paper, gives temporal/dynamics signal for VLAs):
     python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp \
-        --flush_every_episodes 25 --batch_size 16
+        --window 17 --stride 2 --batch_size 4
+
     # local-only (no S3 upload), e.g. for a smoke test:
     python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp \
         --s3_bucket "" --limit_episodes 1
@@ -143,12 +151,30 @@ def flush_to_s3(local_root: pathlib.Path, bucket: str, prefix: str) -> None:
     print(f"[precompute] Upload OK; freed {freed / 1e9:.1f} GB of local disk")
 
 
+def build_window_positions(p: int, window: int, stride: int) -> list[int]:
+    """Causal window of within-episode positions ending at `p`.
+
+    Returns [p - stride*(W-1), ..., p - stride, p], with any position < 0
+    clamped to 0 (i.e., repeat the episode's first frame at the start). Never
+    reaches across episode boundaries.
+    """
+    positions = []
+    for k in range(window - 1, -1, -1):
+        pos = p - stride * k
+        if pos < 0:
+            pos = 0
+        positions.append(pos)
+    return positions
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("config_name", help="TrainConfig name (e.g. pi05_libero_lora_wan_precomp)")
     parser.add_argument("--cache_dir", default=None,
                         help="Local staging dir. Defaults to config.data.tower_features_cache_dir.")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Number of windows per WAN forward. Multi-frame is heavier; lower this "
+                             "if you OOM. 4 is a safe default for T=17 on a 48GB GPU.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cameras", nargs="+", default=None,
                         help="Override cameras to precompute (default: config.model.vega3d_cameras).")
@@ -157,9 +183,19 @@ def main() -> None:
     parser.add_argument("--s3_bucket", default="behavior-challenge",
                         help="S3 bucket for upload + resume. Empty string disables S3 (local-only).")
     parser.add_argument("--s3_prefix", default=None,
-                        help="S3 key prefix. Defaults to tower_features/<repo>/<tower_variant>.")
+                        help="S3 key prefix. Default bakes in tower variant + window/stride + block "
+                             "idx so different settings produce different caches.")
     parser.add_argument("--flush_every_episodes", type=int, default=25,
                         help="Upload to S3 and free local disk every N episodes.")
+    parser.add_argument("--window", type=int, default=None,
+                        help="Temporal window size (frames per WAN clip). For each training frame f, "
+                             "features come from frames [f - stride*(W-1) ... f], clamped at episode "
+                             "start. window=1 is paper-faithful per-frame extraction. window>1 "
+                             "activates WAN's cross-frame attention. Default: config.data.tower_window "
+                             "or 1.")
+    parser.add_argument("--stride", type=int, default=None,
+                        help="Frame stride within the window. e.g. window=17 stride=2 covers 33 real "
+                             "frames of motion (~1.6s at 20Hz). Default: config.data.tower_stride or 1.")
     args = parser.parse_args()
 
     config = get_config(args.config_name)
@@ -170,6 +206,15 @@ def main() -> None:
     tower_kwargs = dict(config.model.vega3d_tower_kwargs or {})
     tower_kwargs.setdefault("output_spatial", 16)
     cameras = tuple(args.cameras) if args.cameras else tuple(config.model.vega3d_cameras)
+
+    # Resolve window / stride: CLI > config > 1.
+    window = args.window if args.window is not None else int(getattr(config.data, "tower_window", 1) or 1)
+    stride = args.stride if args.stride is not None else int(getattr(config.data, "tower_stride", 1) or 1)
+    if window < 1 or stride < 1:
+        raise ValueError(f"window and stride must be >= 1; got window={window} stride={stride}")
+    multi_frame = window > 1
+    print(f"[precompute] window={window} stride={stride} "
+          f"({'multi-frame (cross-frame attn ON)' if multi_frame else 'single-frame (paper-faithful)'})")
 
     cache_dir = args.cache_dir or getattr(config.data, "tower_features_cache_dir", None)
     if not cache_dir:
@@ -190,8 +235,12 @@ def main() -> None:
     print(f"[precompute] Building tower {tower_name} (kwargs={tower_kwargs}) ...")
     tower = TOWER_REGISTRY[tower_name](**tower_kwargs).to(args.device).eval()
     device = torch.device(args.device)
+
+    # Probe via the same code path we'll use for real (encode_window_batch
+    # subsumes single-frame: window=1 makes it equivalent to per-frame encode).
     with torch.no_grad():
-        sample = tower.encode(torch.zeros(1, 3, 224, 224, device=device))
+        probe_clips = torch.zeros(1, max(window, 1), 3, 224, 224, device=device)
+        sample = tower.encode_window_batch(probe_clips, noise_seed=0)
     feat_dim = int(sample.shape[-1])
     num_tokens = int(sample.shape[1])
     output_spatial = tower_kwargs["output_spatial"]
@@ -222,10 +271,18 @@ def main() -> None:
             )
         (cache_root / cam).mkdir(parents=True, exist_ok=True)
 
-    # Resolve S3 destination and the set of already-completed episodes.
+    # Resolve S3 destination and the set of already-completed episodes. Bake
+    # window/stride/feat_block_idx into the default prefix so different
+    # geometries don't silently overwrite each other.
     use_s3 = bool(args.s3_bucket)
     repo_sanitized = config.data.repo_id.replace("/", "_")
-    s3_prefix = args.s3_prefix or f"tower_features/{repo_sanitized}/{tower_name}_{output_spatial}x{feat_dim}"
+    feat_block_idx = int(tower_kwargs.get("feat_block_idx", -1))
+    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}"
+    if window > 1 or stride > 1:
+        variant_tag += f"_w{window}s{stride}"
+    if feat_block_idx >= 0:
+        variant_tag += f"_blk{feat_block_idx}"
+    s3_prefix = args.s3_prefix or f"tower_features/{repo_sanitized}/{variant_tag}"
 
     if use_s3:
         print(f"[precompute] Checking S3 for completed episodes (s3://{args.s3_bucket}/{s3_prefix}) ...")
@@ -252,32 +309,62 @@ def main() -> None:
         "repo_id": config.data.repo_id,
         "total_frames_in_dataset": int(len(episode_indices_arr)),
         "s3_uri": f"s3://{args.s3_bucket}/{s3_prefix}" if use_s3 else None,
+        # Window / stride / block: how this cache was built. The model side is
+        # invariant to these (it just reads [N, num_tokens, feat_dim] per frame),
+        # but the *meaning* of the features changes -- record it for posterity.
+        "window": window,
+        "stride": stride,
+        "feat_block_idx": feat_block_idx,
+        "extraction_mode": "multi_frame_last_slot" if multi_frame else "single_frame",
     }
     (cache_root / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 
     # embed -> upload -> delete loop.
     since_flush = 0
+    cameras_list = list(cameras)
     for ep in tqdm.tqdm(todo, desc="episodes"):
         frame_indices = np.where(episode_indices_arr == ep)[0].tolist()
+        n_frames_in_ep = len(frame_indices)
         per_cam_features: dict[str, list[torch.Tensor]] = {cam: [] for cam in cameras}
 
-        for batch_start in range(0, len(frame_indices), args.batch_size):
-            batch_indices = frame_indices[batch_start: batch_start + args.batch_size]
-            # Load each frame once; collect per-camera image batches.
-            cam_imgs: dict[str, list[torch.Tensor]] = {cam: [] for cam in cameras}
-            for fi in batch_indices:
-                item = dataset[fi]
-                for cam in cameras:
-                    cam_imgs[cam].append(prepare_image(item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], device))
+        for batch_start_pos in range(0, n_frames_in_ep, args.batch_size):
+            batch_positions = list(
+                range(batch_start_pos, min(batch_start_pos + args.batch_size, n_frames_in_ep))
+            )
+            # Build causal windows for each training frame in the batch.
+            window_positions_per_item = [
+                build_window_positions(p, window, stride) for p in batch_positions
+            ]
+            # Dedupe: many training frames share window positions (especially
+            # with large W or small stride). Load + prepare each unique position
+            # at most once per batch, then assemble clips by lookup.
+            unique_positions = sorted({pos for wp in window_positions_per_item for pos in wp})
+            prepared_by_pos: dict[int, dict[str, torch.Tensor]] = {}
+            for pos in unique_positions:
+                item = dataset[frame_indices[pos]]
+                prepared_by_pos[pos] = {
+                    cam: prepare_image(item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], device).squeeze(0)
+                    # squeeze: prepare_image returns [1, 3, 224, 224]; clip stacking wants [3, 224, 224]
+                    for cam in cameras
+                }
+            # Build [B, T, 3, 224, 224] per camera, then encode.
             for cam in cameras:
+                clip_list = []
+                for wp in window_positions_per_item:
+                    clip_list.append(torch.stack([prepared_by_pos[pos][cam] for pos in wp], dim=0))
+                clips = torch.stack(clip_list, dim=0)  # [B, T, 3, 224, 224]
+                # Deterministic noise seed per (episode, batch_start, camera).
+                # Stable across re-runs of precompute -> reproducible cache.
+                cam_idx = cameras_list.index(cam)
+                seed = (int(ep) * 1_000_003 + int(batch_start_pos) * 17 + cam_idx) % (2**31 - 1)
                 with torch.no_grad():
-                    feats = tower.encode(torch.cat(cam_imgs[cam], dim=0))
+                    feats = tower.encode_window_batch(clips, noise_seed=seed)  # [B, num_tokens, feat_dim]
                 per_cam_features[cam].append(feats.detach().to(torch.bfloat16).cpu())
 
         for cam in cameras:
             cat = torch.cat(per_cam_features[cam], dim=0).contiguous()
-            assert cat.shape[0] == len(frame_indices), (
-                f"Frame count mismatch for ep {ep} cam {cam}: {cat.shape[0]} vs {len(frame_indices)}"
+            assert cat.shape[0] == n_frames_in_ep, (
+                f"Frame count mismatch for ep {ep} cam {cam}: {cat.shape[0]} vs {n_frames_in_ep}"
             )
             out_path = cache_root / cam / f"ep_{ep:06d}.safetensors"
             tmp_path = out_path.with_suffix(".safetensors.tmp")

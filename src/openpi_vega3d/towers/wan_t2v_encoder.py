@@ -228,6 +228,131 @@ class WanT2VOnlineEncoder(nn.Module):
                 del out_batch
             return feats
 
+    def _forward_window_batch(
+        self,
+        clips: torch.Tensor,
+        device: torch.device,
+        noise_seed: int | None = None,
+    ) -> torch.Tensor:
+        """Multi-frame: bundle T frames as ONE clip per batch item.
+
+        Unlike `_forward_single_video` (which treats each input frame as its own
+        T=1 batch item — paper-faithful per-frame extraction), this method
+        constructs one batch item with a real temporal axis, so WAN's DiT
+        cross-frame attention actually runs *within* the clip. The temporal
+        slice that gets returned is the **last latent frame** of f_gen — a
+        causal summary of the window ending at the current frame, suitable for
+        fusion into the current frame's SigLIP tokens.
+
+        This goes beyond the published VEGA-3D code (which is per-frame); it is
+        the path used when the downstream consumer is single-frame (e.g., Pi0.5)
+        and the only place to inject temporal/dynamics signal is the encoder.
+
+        Args:
+            clips: [B, T, 3, H, W] — B clips, each a temporal window of T raw
+                frames (any input range; `_prepare_frames` normalizes).
+            device: target device.
+            noise_seed: optional int. When set, noise is drawn deterministically
+                from this seed (per call) — gives reproducible cached features.
+
+        Returns:
+            [B, output_spatial**2, C] — last-temporal-slot features, pooled to
+            the encoder's `output_spatial` grid (to match the SigLIP token
+            count downstream). C = feat_dim of the hooked DiT block.
+        """
+        if clips.ndim != 5:
+            raise ValueError(f"Expected [B, T, 3, H, W], got {tuple(clips.shape)}")
+        b, t, c_in, h_in, w_in = clips.shape
+        if c_in != 3:
+            raise ValueError(f"Expected 3 channels (dim 2), got {c_in}")
+        if b == 0 or t == 0:
+            feat_dim = getattr(self.cfg, "dim", 1280)
+            return clips.new_zeros((b, self.output_spatial * self.output_spatial, feat_dim))
+
+        self._move_models_to_device(device)
+
+        # Prepare frames: flatten B*T, run the existing per-frame prep (range
+        # normalize + letterbox to WAN resolution), then reshape to per-clip
+        # [3, T, H', W'] for the VAE.
+        flat = clips.reshape(b * t, c_in, h_in, w_in).to(device)
+        flat = self._prepare_frames(flat)  # [B*T, 3, H', W'] in [-1, 1], param_dtype
+        prepared = flat.reshape(b, t, 3, self.frame_height, self.frame_width)
+        prepared = prepared.permute(0, 2, 1, 3, 4).contiguous()  # [B, 3, T, H', W']
+
+        self._ensure_scheduler_ready(device)
+        tau = self._select_timestep(self.scheduler.timesteps, target_timestep=self.timestep)
+        context = self._get_text_context(device=device, batch_size=b)
+
+        with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=self.param_dtype):
+            # VAE.encode takes a list of [3, T, H', W'] clips → list of [C', T_lat, h, w] latents.
+            base_latents = self.vae.encode([prepared[i] for i in range(b)])
+            target_shape = list(base_latents[0].shape)  # [C', T_lat, h, w]
+            t_lat = target_shape[1]
+            seq_len = math.ceil(
+                (target_shape[2] * target_shape[3]) / (self.patch_size[1] * self.patch_size[2]) * t_lat
+            )
+
+            latent_batch = torch.stack(base_latents, dim=0)  # [B, C', T_lat, h, w]
+            if noise_seed is None:
+                noise = torch.randn_like(latent_batch)
+            else:
+                gen = torch.Generator(device=device).manual_seed(int(noise_seed))
+                noise = torch.randn(
+                    latent_batch.shape, generator=gen, device=device, dtype=latent_batch.dtype
+                )
+            noisy_latents = self.scheduler.add_noise(
+                original_samples=latent_batch,
+                noise=noise,
+                timesteps=tau.expand(b),
+            )
+            noisy_latents_list = [noisy_latents[i] for i in range(b)]
+
+            feat_holder = {}
+
+            def _hook(_, __, output):
+                feat_holder["feat"] = output.detach()
+
+            block_idx = (len(self.model.blocks) - 1) if self.feat_block_idx < 0 else self.feat_block_idx
+            if block_idx < 0 or block_idx >= len(self.model.blocks):
+                raise ValueError(f"feat_block_idx out of range: {block_idx}")
+
+            handle = self.model.blocks[block_idx].register_forward_hook(_hook)
+            try:
+                t_tensor = tau.expand(b).to(device=device, dtype=torch.long)
+                self.model(noisy_latents_list, t=t_tensor, context=context, seq_len=seq_len)
+            finally:
+                handle.remove()
+
+            if "feat" not in feat_holder:
+                raise RuntimeError("Failed to capture WAN-T2V intermediate features.")
+
+            feats = feat_holder["feat"]  # [B, T_lat * grid_h * grid_w, C]
+            grid_h = self.frame_height // (self.vae_stride[1] * self.patch_size[1])
+            grid_w = self.frame_width // (self.vae_stride[2] * self.patch_size[2])
+            expected = t_lat * grid_h * grid_w
+            if feats.shape[1] != expected:
+                raise RuntimeError(
+                    f"Unexpected token count: {feats.shape[1]} "
+                    f"(expected {expected} = T_lat={t_lat} * {grid_h}*{grid_w})."
+                )
+
+            # [B, T_lat, grid_h, grid_w, C] → take last temporal slot.
+            feats = feats.view(b, t_lat, grid_h, grid_w, feats.shape[-1])
+            last_slot = feats[:, -1]  # [B, grid_h, grid_w, C] — causal summary @ current frame
+            # Pool spatially to match SigLIP's 16×16 grid downstream.
+            last_slot = last_slot.permute(0, 3, 1, 2).contiguous()  # [B, C, grid_h, grid_w]
+            pooled = F.adaptive_avg_pool2d(
+                last_slot, output_size=(self.output_spatial, self.output_spatial)
+            )
+            # [B, C, S, S] → [B, S*S, C] to match WanT2VTower.encode's contract.
+            pooled = pooled.permute(0, 2, 3, 1).reshape(
+                b, self.output_spatial * self.output_spatial, -1
+            ).contiguous()
+
+            # Release large temporaries early.
+            del latent_batch, noisy_latents, noisy_latents_list, noise
+            return pooled
+
     def forward(
         self,
         frames: torch.Tensor,

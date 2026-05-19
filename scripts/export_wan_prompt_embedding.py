@@ -16,6 +16,10 @@ This path is what `WanT2VOnlineEncoder` looks for by default.
 
 Usage:
     python scripts/export_wan_prompt_embedding.py
+    # The default prompt is "" (empty), matching the VEGA-3D paper (Sec 4.2:
+    # "minimizing semantic hallucination") and their export script's default.
+    # Override only if you intentionally want text conditioning baked into the
+    # cached features.
     python scripts/export_wan_prompt_embedding.py --prompt "robot manipulation scene"
 """
 
@@ -27,7 +31,12 @@ import pathlib
 
 import torch
 
-DEFAULT_PROMPT = "a video of a scene"
+# Paper Sec 4.2: "We feed z_k into the backbone using an empty text prompt
+# (c_text = "")... This ensures the activated features rely solely on the
+# visual signal and the model's learned physics, minimizing semantic
+# hallucination." Matches VEGA-3D/scripts/3d/preprocessing/export_wan_prompt_embedding.py
+# default (--prompt "").
+DEFAULT_PROMPT = ""
 DEFAULT_OUT = (
     pathlib.Path(__file__).resolve().parent.parent
     / "src" / "openpi_vega3d" / "towers" / "wan_prompt_embedding.pt"
