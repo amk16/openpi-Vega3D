@@ -16,7 +16,7 @@ cd /workspace/openpi-Vega3D
 # Download LIBERO-Pro BDDL/init files (one-time, persists across restarts)
 if [ ! -f /opt/libero-pro/.data_downloaded ]; then
     echo "Downloading LIBERO-Pro data files..."
-    /venv/libero/bin/pip install huggingface_hub
+    /venv/libero/bin/pip3 install huggingface_hub
     /venv/libero/bin/python -c "
 from huggingface_hub import snapshot_download
 snapshot_download('zhouxueyang/LIBERO-Pro', local_dir='/tmp/libero-pro-data', repo_type='dataset')
