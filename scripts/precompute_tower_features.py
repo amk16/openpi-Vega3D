@@ -277,11 +277,7 @@ def main() -> None:
     use_s3 = bool(args.s3_bucket)
     repo_sanitized = config.data.repo_id.replace("/", "_")
     feat_block_idx = int(tower_kwargs.get("feat_block_idx", -1))
-    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}"
-    if window > 1 or stride > 1:
-        variant_tag += f"_w{window}s{stride}"
-    if feat_block_idx >= 0:
-        variant_tag += f"_blk{feat_block_idx}"
+    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}_w{window}s{stride}_blk{feat_block_idx}"
     s3_prefix = args.s3_prefix or f"tower_features/{repo_sanitized}/{variant_tag}"
 
     if use_s3:

@@ -14,7 +14,7 @@ NVME_DIR=/workspace
 HF_HOME="$NVME_DIR/.hf_home"
 aws s3 sync s3://behavior-challenge/lerobot/ "$HF_HOME/lerobot/"
 
-python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp --window 1 --stride 1 --batch_size 4
+python scripts/precompute_tower_features.py pi05_libero_lora_wan_precomp --window 1 --stride 1 --batch_size 128
 
 # Sync into the base tower_features/ dir: the S3 keys already carry the
 # physical-intelligence_libero/wan_t2v_16x1536/<camera>/... suffix, which must
