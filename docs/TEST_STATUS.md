@@ -5,6 +5,63 @@ Newest phase appears first.
 
 ---
 
+## Phase 7: DreamDojo Training Setup
+
+### Sub-Phase 7.0 — Merge origin/main (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Merge completes with single conflict | Clean merge, one conflict in `policy_utils.py` resolved | **PASS** |
+| No remaining conflict markers | `grep -rn "<<<<<<" src/ scripts/ docs/` returns empty | **PASS** |
+| Key files from main present | `precompute_tower_features.py`, `probe_wan.py`, `train.py` exist | **PASS** |
+
+### Sub-Phase 7.1 — Pi0Config feat_dim (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `Pi0Config` with `vega3d_tower_name="dreamdojo"` auto-derives `feat_dim=2048` | No explicit `vega3d_tower_feat_dim` needed | **PASS** (code review) |
+| `Pi0Config` with unknown tower name still raises `ValueError` | Fallback error preserved | **PASS** (code review) |
+
+### Sub-Phase 7.2 — Probe script (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `scripts/probe_dreamdojo.py` exists and is syntactically valid | `python3 -c "import ast; ast.parse(open('scripts/probe_dreamdojo.py').read())"` | **PASS** |
+| Script prints guidance when no checkpoint present | Offline mode with user-friendly message | **PASS** (code review) |
+
+### Sub-Phase 7.3 — Precompute adaptation (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `ensure_dreamdojo_checkpoint()` raises `FileNotFoundError` with guidance | Clear download instructions in error message | **PASS** (code review) |
+| `prepare_image()` accepts resolution parameter | Default 224 (backward compat), DreamDojo uses 256 | **PASS** (code review) |
+| `image_resolution` resolved from tower kwargs | `input_resolution` key read, defaults to 224 | **PASS** (code review) |
+
+### Sub-Phase 7.4 — LIBERO training configs (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `pi05_libero_lora_dreamdojo` config exists | In-process tower config with batch=4 | **PASS** (code review) |
+| `pi05_libero_lora_dreamdojo_precomp` config exists | Precomputed features, skip_tower_construction=True | **PASS** (code review) |
+| No DreamDojo semonly config | WAN semonly serves as shared control (force_gate=1.0 zeros generative features regardless of tower) | **PASS** (verified removed) |
+| Both configs mirror WAN hyperparameters | 30K steps, 1e-5 LR, cosine decay, same freeze filter | **PASS** (code review) |
+
+### Sub-Phase 7.5 — B1K config fix (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| B1K DreamDojo configs (`pi05_b1k_dreamdojo`, `pi05_b1k_dreamdojo_wrist`) commented out | Referenced `LeRobotB1KDataConfig` which is disabled — caused `NameError` at import time | **PASS** (fixed) |
+| Re-enable instructions present in comment block | Search "DISABLED: LeRobotB1KDataConfig" in `config.py` | **PASS** |
+| No uncommented references to `LeRobotB1KDataConfig` remain | `grep -v '#' config.py \| grep LeRobotB1KDataConfig` returns empty | **PASS** |
+
+### Follow-ups
+
+- Runtime config parse verification (requires torch environment)
+- Precompute smoke test with real checkpoint
+- In-process training memory profiling on 48GB GPU
+
+---
+
 ## Phase 6: DreamDojo as Third Generative-Tower Backbone
 
 ### Sub-Phase 6.4 — Spatial-Grid Adaptation (2026-05-19)

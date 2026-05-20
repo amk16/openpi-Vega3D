@@ -27,6 +27,47 @@ Newest phase appears first.
 
 ---
 
+## Phase 7: DreamDojo Training Setup (2026-05-20)
+
+**Goal**: Bring DreamDojo to same training-readiness as WAN — scripts, configs, and Pi0Config integration ready for adapter training. Setup only; no training runs.
+
+### Sub-Phase 7.0 — Merge origin/main → dreamdojo (2026-05-20)
+
+Merged training pipeline from main: precomputed features, smart initialization (P_gen zero-init, P_sem identity-init, gate bias 4.0), S3 checkpoint sync, validation data loader, `encode_window_batch`, three WAN LIBERO configs.
+
+### Sub-Phase 7.1 — Pi0Config feat_dim auto-derive (2026-05-20)
+
+| File | Change |
+|------|--------|
+| `src/openpi/models/pi0_config.py` | Added `dreamdojo` → 2048 to `__post_init__` feat_dim derivation |
+
+### Sub-Phase 7.2 — Probe script (2026-05-20)
+
+| File | Change |
+|------|--------|
+| `scripts/probe_dreamdojo.py` | New: mirrors `probe_wan.py` for DreamDojo, supports offline/online mode |
+
+### Sub-Phase 7.3 — Precompute script adaptation (2026-05-20)
+
+| File | Change |
+|------|--------|
+| `scripts/precompute_tower_features.py` | Added `ensure_dreamdojo_checkpoint()`, configurable image resolution in `prepare_image()` |
+
+### Sub-Phase 7.4 — LIBERO training configs (2026-05-20)
+
+| File | Change |
+|------|--------|
+| `src/openpi/training/config.py` | Added `pi05_libero_lora_dreamdojo`, `pi05_libero_lora_dreamdojo_precomp` |
+
+### Key Decisions
+
+1. **LIBERO, not B1K.** Matches WAN training for fair comparison. B1K DreamDojo configs from Phase 6 commented out (depend on disabled `LeRobotB1KDataConfig`); re-enable instructions inline.
+2. **Single-frame (T=1) precompute.** Multi-frame windowing deferred — Cosmos temporal attention viability unknown.
+3. **batch=4 in-process, batch=64 precomputed.** DreamDojo 2B is heavier than WAN 1.3B.
+4. **Two configs, no semonly.** WAN semonly (`force_gate=1.0`) already serves as shared control for ALL towers — generative features are zeroed regardless of which tower produced them.
+
+---
+
 ## Phase 6: DreamDojo as Third Generative-Tower Backbone (2026-05-12)
 
 **Goal**: Register DreamDojo (backed by NVIDIA's Cosmos-Predict2.5-2B-teacher) as a third backbone in TOWER_REGISTRY alongside "vae" and "wan_t2v". Infrastructure-only — adapter training is Phase 7.

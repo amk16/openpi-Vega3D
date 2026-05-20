@@ -89,8 +89,22 @@ def ensure_prompt_embedding() -> None:
     subprocess.run([sys.executable, str(export_script)], check=True)
 
 
-def prepare_image(raw, device: torch.device) -> torch.Tensor:
-    """Convert a LeRobot dataset image entry to [1, 3, 224, 224] in [-1, 1]."""
+def ensure_dreamdojo_checkpoint(checkpoint_dir: str) -> None:
+    """Check that a DreamDojo .pt checkpoint exists; print guidance if missing."""
+    if os.path.isdir(checkpoint_dir) and any(f.endswith(".pt") for f in os.listdir(checkpoint_dir)):
+        return
+    raise FileNotFoundError(
+        f"DreamDojo checkpoint not found at {checkpoint_dir}. To prepare it:\n"
+        "  1. Download DreamDojo 2B pretrain from nvidia/DreamDojo on HuggingFace\n"
+        "     (2B_pretrain/iter_000140000/model/ directory)\n"
+        "  2. Convert DCP to .pt: python convert_distcp_to_pt.py <dcp_dir> <output.pt>\n"
+        f"  3. Place the .pt file in {checkpoint_dir}/\n"
+        "  4. Place Cosmos VAE in <checkpoint_dir>/vae/ or set $COSMOS_VAE_DIR"
+    )
+
+
+def prepare_image(raw, device: torch.device, resolution: int = 224) -> torch.Tensor:
+    """Convert a LeRobot dataset image entry to [1, 3, H, W] in [-1, 1]."""
     if isinstance(raw, np.ndarray):
         t = torch.from_numpy(raw)
         if t.ndim == 3 and t.shape[-1] == 3:
@@ -104,8 +118,9 @@ def prepare_image(raw, device: torch.device) -> torch.Tensor:
         if t.ndim == 3 and t.shape[0] != 3 and t.shape[-1] == 3:
             t = t.permute(2, 0, 1)
     t = t.unsqueeze(0).to(device)  # [1, 3, H, W]
-    if t.shape[-2:] != (224, 224):
-        t = torch.nn.functional.interpolate(t, size=(224, 224), mode="bilinear", align_corners=False)
+    target = (resolution, resolution)
+    if t.shape[-2:] != target:
+        t = torch.nn.functional.interpolate(t, size=target, mode="bilinear", align_corners=False)
     return t * 2.0 - 1.0  # [-1, 1]
 
 
@@ -225,10 +240,16 @@ def main() -> None:
     cache_root = pathlib.Path(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
 
-    # Auto-download WAN + T5 prompt embedding if needed.
+    # Auto-download / verify tower checkpoint.
     if tower_name == "wan_t2v":
         ensure_wan_checkpoint(tower_kwargs["checkpoint_dir"])
         ensure_prompt_embedding()
+    elif tower_name == "dreamdojo":
+        ensure_dreamdojo_checkpoint(tower_kwargs["checkpoint_dir"])
+
+    # Resolve image resolution for prepare_image(). DreamDojo uses 256x256
+    # internally; feeding that directly avoids a redundant 224→256 resize.
+    image_resolution = int(tower_kwargs.get("input_resolution", 224))
 
     # Build the tower and probe its actual output shape.
     from openpi_vega3d.towers import TOWER_REGISTRY
@@ -239,7 +260,7 @@ def main() -> None:
     # Probe via the same code path we'll use for real (encode_window_batch
     # subsumes single-frame: window=1 makes it equivalent to per-frame encode).
     with torch.no_grad():
-        probe_clips = torch.zeros(1, max(window, 1), 3, 224, 224, device=device)
+        probe_clips = torch.zeros(1, max(window, 1), 3, image_resolution, image_resolution, device=device)
         sample = tower.encode_window_batch(probe_clips, noise_seed=0)
     feat_dim = int(sample.shape[-1])
     num_tokens = int(sample.shape[1])
@@ -343,8 +364,8 @@ def main() -> None:
             for pos in unique_positions:
                 item = dataset[frame_indices[pos]]
                 prepared_by_pos[pos] = {
-                    cam: prepare_image(item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], device).squeeze(0)
-                    # squeeze: prepare_image returns [1, 3, 224, 224]; clip stacking wants [3, 224, 224]
+                    cam: prepare_image(item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], device, image_resolution).squeeze(0)
+                    # squeeze: prepare_image returns [1, 3, R, R]; clip stacking wants [3, R, R]
                     for cam in cameras
                 }
             # Build [B, T, 3, 224, 224] per camera, then encode.
