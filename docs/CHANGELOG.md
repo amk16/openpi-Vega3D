@@ -59,10 +59,24 @@ Merged training pipeline from main: precomputed features, smart initialization (
 |------|--------|
 | `src/openpi/training/config.py` | Added `pi05_libero_lora_dreamdojo`, `pi05_libero_lora_dreamdojo_precomp` |
 
+### Sub-Phase 7.7 — Base Cosmos control backbone (2026-05-20)
+
+**Why:** To isolate whether DreamDojo's advantage (if any) over WAN comes from Cosmos architecture or egocentric video fine-tuning.
+
+**Key finding:** DreamDojo and base Cosmos-Predict2.5-2B are architecturally identical (`in_channels=17`). Channel 17 is a condition video input mask (binary: which frames are given vs. to-predict), NOT an action channel — actions enter via MLP embedders. Both use NVIDIA-native `.pt` format with DCP key conversion.
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/__init__.py` | `"cosmos_base"` → `DreamDojoTower` registry alias |
+| `src/openpi/models/pi0_config.py` | `cosmos_base` in feat_dim auto-derive (2048) |
+| `src/openpi/training/config.py` | Added `pi05_libero_lora_cosmos_base`, `pi05_libero_lora_cosmos_base_precomp` |
+| `scripts/precompute_tower_features.py` | `ensure_cosmos_base_checkpoint()` with HF gated repo guidance |
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | Comments corrected: "action channel" → "condition mask" |
+
 ### Key Decisions
 
 1. **LIBERO, not B1K.** Matches WAN training for fair comparison. B1K DreamDojo configs from Phase 6 commented out (depend on disabled `LeRobotB1KDataConfig`); re-enable instructions inline.
-2. **Single-frame (T=1) precompute.** Multi-frame windowing deferred — Cosmos temporal attention viability unknown.
+2. **Multi-frame (window=17, stride=2) precompute.** Matches WAN config for fair comparison. Cosmos VAE + Transformer natively support T>1; `encode_window_batch` extracts last temporal slot as causal summary.
 3. **batch=4 in-process, batch=64 precomputed.** DreamDojo 2B is heavier than WAN 1.3B.
 4. **Two configs, no semonly.** WAN semonly (`force_gate=1.0`) already serves as shared control for ALL towers — generative features are zeroed regardless of which tower produced them.
 

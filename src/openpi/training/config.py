@@ -1243,12 +1243,114 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # Single-frame extraction (paper-faithful). Multi-frame windowing
-            # for DreamDojo deferred pending temporal attention investigation.
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/dreamdojo_16x2048_w1s1_blk20",
+            # Multi-frame causal window matching WAN config (window=17,
+            # stride=2). Each training frame's DreamDojo feature is computed
+            # from a [f-32, f-30, ..., f-2, f] clip — Cosmos DiT temporal
+            # attention runs across the window, last latent slot kept.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/dreamdojo_16x2048_w17s2_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            tower_window=1,
-            tower_stride=1,
+            tower_window=17,
+            tower_stride=2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    #
+    # ── Base Cosmos-Predict2.5-2B LIBERO configs ──────────────────────────
+    # Ablation control: same Cosmos architecture as DreamDojo but WITHOUT
+    # action-conditioning fine-tuning. Isolates architecture vs fine-tuning
+    # effects in WAN/DreamDojo/Cosmos comparisons.
+    #
+    TrainConfig(
+        name="pi05_libero_lora_cosmos_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="cosmos_base",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_cosmos_base_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="cosmos_base",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w17s2_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,

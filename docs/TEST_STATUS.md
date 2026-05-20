@@ -46,6 +46,16 @@ Newest phase appears first.
 | No DreamDojo semonly config | WAN semonly serves as shared control (force_gate=1.0 zeros generative features regardless of tower) | **PASS** (verified removed) |
 | Both configs mirror WAN hyperparameters | 30K steps, 1e-5 LR, cosine decay, same freeze filter | **PASS** (code review) |
 
+### Sub-Phase 7.3b — Multi-frame encode_window_batch (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `encode()` single-frame regression | Output shape `(1, 256, 2048)` unchanged | **PASS** (real checkpoint) |
+| `encode_window_batch(T=17)` | Multi-frame output `(1, 256, 2048)` matches single-frame contract | **PASS** (real checkpoint) |
+| `encode_window_batch(T=1)` fallback | Falls back to single-frame `encode()` | **PASS** (real checkpoint) |
+| Padding mask shape | `[1, 1, H, W]` — Cosmos repeats along T internally | **PASS** (verified via forward pass) |
+| Precomp config updated | `tower_window=17, tower_stride=2, cache_dir=...w17s2...` | **PASS** (code review) |
+
 ### Sub-Phase 7.5 — B1K config fix (2026-05-20)
 
 | Test | Validates | Result |
@@ -54,11 +64,24 @@ Newest phase appears first.
 | Re-enable instructions present in comment block | Search "DISABLED: LeRobotB1KDataConfig" in `config.py` | **PASS** |
 | No uncommented references to `LeRobotB1KDataConfig` remain | `grep -v '#' config.py \| grep LeRobotB1KDataConfig` returns empty | **PASS** |
 
+### Sub-Phase 7.7 — Base Cosmos control backbone (2026-05-20)
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Registry: `cosmos_base` resolves to `DreamDojoTower` | Same class, alias only | **PASS** (AST verified) |
+| `Pi0Config` with `vega3d_tower_name="cosmos_base"` auto-derives `feat_dim=2048` | No explicit setting needed | **PASS** (AST verified) |
+| `pi05_libero_lora_cosmos_base` config exists and parses | In-process tower config | **PASS** (AST verified) |
+| `pi05_libero_lora_cosmos_base_precomp` config exists and parses | Precomputed features config | **PASS** (AST verified) |
+| `ensure_cosmos_base_checkpoint()` present in precompute script | HF download guidance | **PASS** (AST verified) |
+| No `CosmosBaseTower` subclass exists | Dropped per architecture identity finding | **PASS** (grep confirmed) |
+| Comments say "condition mask" not "action channel" | Corrected per NVIDIA source investigation | **PASS** (grep confirmed) |
+
 ### Follow-ups
 
 - Runtime config parse verification (requires torch environment)
 - Precompute smoke test with real checkpoint
 - In-process training memory profiling on 48GB GPU
+- Online probe with base Cosmos checkpoint (after HF download)
 
 ---
 

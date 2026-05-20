@@ -67,6 +67,7 @@ LIBERO_CAMERA_TO_DATASET_KEY = {
 }
 
 HF_WAN_REPO = "Wan-AI/Wan2.1-T2V-1.3B"
+HF_COSMOS_REPO = "nvidia/Cosmos-Predict2.5-2B"
 EP_FILE_RE = re.compile(r"ep_(\d+)\.safetensors$")
 
 
@@ -100,6 +101,22 @@ def ensure_dreamdojo_checkpoint(checkpoint_dir: str) -> None:
         "  2. Convert DCP to .pt: python convert_distcp_to_pt.py <dcp_dir> <output.pt>\n"
         f"  3. Place the .pt file in {checkpoint_dir}/\n"
         "  4. Place Cosmos VAE in <checkpoint_dir>/vae/ or set $COSMOS_VAE_DIR"
+    )
+
+
+def ensure_cosmos_base_checkpoint(checkpoint_dir: str) -> None:
+    """Check that a base Cosmos .pt checkpoint exists; print guidance if missing."""
+    if os.path.isdir(checkpoint_dir) and any(f.endswith(".pt") for f in os.listdir(checkpoint_dir)):
+        return
+    raise FileNotFoundError(
+        f"Base Cosmos checkpoint not found at {checkpoint_dir}. To prepare it:\n"
+        f"  1. Accept the license at https://huggingface.co/{HF_COSMOS_REPO}\n"
+        "  2. Download the post-trained checkpoint:\n"
+        f"     huggingface-cli download {HF_COSMOS_REPO} base/post-trained/ "
+        f"--local-dir {checkpoint_dir}\n"
+        f"  3. Move the .pt file to {checkpoint_dir}/ (top level)\n"
+        "  4. Place Cosmos VAE in <checkpoint_dir>/vae/ or set $COSMOS_VAE_DIR\n"
+        "     (same VAE as DreamDojo — can symlink from DreamDojo-2B/vae/)"
     )
 
 
@@ -246,8 +263,10 @@ def main() -> None:
         ensure_prompt_embedding()
     elif tower_name == "dreamdojo":
         ensure_dreamdojo_checkpoint(tower_kwargs["checkpoint_dir"])
+    elif tower_name == "cosmos_base":
+        ensure_cosmos_base_checkpoint(tower_kwargs["checkpoint_dir"])
 
-    # Resolve image resolution for prepare_image(). DreamDojo uses 256x256
+    # Resolve image resolution for prepare_image(). DreamDojo/Cosmos use 256x256
     # internally; feeding that directly avoids a redundant 224→256 resize.
     image_resolution = int(tower_kwargs.get("input_resolution", 224))
 

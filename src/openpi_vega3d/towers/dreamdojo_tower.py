@@ -1,11 +1,14 @@
-"""DreamDojo generative tower wrapping Cosmos-Predict2.5-2B.
+"""Cosmos-Predict2.5-2B generative tower (serves DreamDojo and base Cosmos).
 
-Phase 6 backbone: extracts intermediate DiT features from a frozen
-Cosmos-Predict2.5-2B transformer via a single denoising step, analogous
-to how WanT2VTower extracts features from WAN T2V.
+Extracts intermediate DiT features from a frozen Cosmos-Predict2.5-2B
+transformer via a single denoising step, analogous to WanT2VTower.
 
-Sub-phase 6.3: real encode() with null-text forward pass through the
-Cosmos DiT, hooked at an intermediate transformer block.
+Both DreamDojo and base Cosmos-Predict2.5-2B share in_channels=17 (16 VAE
+latent + 1 condition mask channel). The condition mask is a binary video
+input mask indicating which frames are given vs. to-predict; zeros mean
+unconditional (image mode). The only difference is checkpoint weights:
+DreamDojo is fine-tuned on 44k hours of egocentric video, base Cosmos is
+NVIDIA's pretrained checkpoint. Use different checkpoint_dir to switch.
 """
 
 import logging
@@ -22,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 # Cosmos-Predict2.5-2B architecture config (confirmed via DreamDojo DCP metadata).
 # 16 heads * 128 dim = 2048 hidden_size, 28 transformer blocks, 1.96B params.
-# in_channels=17: DreamDojo adds 1 action channel on top of base Cosmos's 16 VAE
-# latent channels. With concat_padding_mask=True, total patchify input = 18 channels,
-# matching DreamDojo's x_embedder.proj.1.weight shape of (2048, 72) = (hidden, 18*4).
+# in_channels=17: 16 VAE latent channels + 1 condition mask channel (binary
+# video input mask: which frames are given vs. to-predict; zeros = unconditional).
+# Both DreamDojo and base Cosmos-Predict2.5-2B use this layout. With
+# concat_padding_mask=True, total patchify input = 18 channels, giving
+# x_embedder shape (2048, 72) = (hidden, 18*4).
 _COSMOS_2B_CONFIG = {
     "num_attention_heads": 16,
     "attention_head_dim": 128,
@@ -104,8 +109,7 @@ class DreamDojoTower(BaseTower):
             self._num_blocks = _COSMOS_2B_CONFIG["num_layers"]
             logger.warning(
                 "DreamDojoTower: no transformer checkpoint at %s — offline mode. "
-                "Download DreamDojo 2B pretrain from nvidia/DreamDojo on HuggingFace, "
-                "convert DCP to .pt, place in checkpoint_dir.",
+                "Place a Cosmos-Predict2.5-2B .pt checkpoint in this directory.",
                 checkpoint_dir,
             )
 
@@ -194,9 +198,9 @@ class DreamDojoTower(BaseTower):
             x_video = x.unsqueeze(2)  # [B, 3, 1, H, W]
             latents = self.vae.encode(x_video).latent_dist.mode()  # [B, 16, 1, H/8, W/8]
 
-            # Concat zero action channel (in_channels=17 = 16 VAE + 1 action)
-            action_ch = latents.new_zeros(b, 1, *latents.shape[2:])
-            hidden_states = torch.cat([latents, action_ch], dim=1)  # [B, 17, 1, H/8, W/8]
+            # Concat zero condition mask (in_channels=17 = 16 VAE + 1 cond mask; zeros = unconditional)
+            cond_mask = latents.new_zeros(b, 1, *latents.shape[2:])
+            hidden_states = torch.cat([latents, cond_mask], dim=1)  # [B, 17, 1, H/8, W/8]
 
             # Flow-matching noise at target timestep
             noise = torch.randn_like(hidden_states)
@@ -246,6 +250,120 @@ class DreamDojoTower(BaseTower):
             return feats
 
     # ------------------------------------------------------------------
+    # Multi-frame encode (precompute path)
+    # ------------------------------------------------------------------
+
+    def encode_window_batch(self, clips: Tensor, noise_seed: int | None = None) -> Tensor:
+        """Multi-frame temporal window encoding, matching WAN's approach.
+
+        Runs the full clip through the Cosmos video VAE and DiT with
+        cross-frame temporal attention active, then extracts the LAST
+        temporal latent slot as a causal summary of the window.
+
+        Args:
+            clips: [B, T, 3, H, W] — B clips of T raw frames each.
+            noise_seed: deterministic noise for reproducible cached features.
+
+        Returns:
+            [B, output_spatial**2, feat_dim] — last-temporal-slot features
+            pooled to the configured spatial grid.
+        """
+        if clips.ndim != 5:
+            raise ValueError(f"Expected [B, T, 3, H, W], got {tuple(clips.shape)}")
+        b, t, c_in, h_in, w_in = clips.shape
+
+        if t == 1:
+            return self.encode(clips[:, 0])
+
+        if not self.online:
+            return torch.zeros(
+                b, self._output_spatial**2, self._feat_dim,
+                dtype=clips.dtype, device=clips.device,
+            )
+
+        pt_dtype = _DTYPE_MAP[self._dtype_str]
+        device = clips.device
+
+        with torch.inference_mode():
+            flat = clips.reshape(b * t, c_in, h_in, w_in)
+            flat = to_neg_one_to_one(flat).to(dtype=pt_dtype)
+            if flat.shape[-2] != self._input_resolution or flat.shape[-1] != self._input_resolution:
+                flat = F.interpolate(
+                    flat,
+                    size=(self._input_resolution, self._input_resolution),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            # [B, 3, T, H, W] — video VAE input format
+            x_video = flat.reshape(b, t, 3, self._input_resolution, self._input_resolution)
+            x_video = x_video.permute(0, 2, 1, 3, 4).contiguous()
+
+            latents = self.vae.encode(x_video).latent_dist.mode()  # [B, 16, T_lat, H/8, W/8]
+            t_lat = latents.shape[2]
+            lat_h, lat_w = latents.shape[-2], latents.shape[-1]
+
+            cond_mask = latents.new_zeros(b, 1, t_lat, lat_h, lat_w)
+            hidden_states = torch.cat([latents, cond_mask], dim=1)  # [B, 17, T_lat, H/8, W/8]
+
+            if noise_seed is not None:
+                gen = torch.Generator(device=device).manual_seed(int(noise_seed))
+                noise = torch.randn(hidden_states.shape, generator=gen, device=device, dtype=hidden_states.dtype)
+            else:
+                noise = torch.randn_like(hidden_states)
+
+            scheduler = self._get_scheduler(device)
+            tau = self._nearest_timestep(scheduler)
+            noisy = scheduler.scale_noise(hidden_states, tau.expand(b), noise)
+
+            text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
+            # Spatial-only mask; transformer broadcasts along T internally.
+            padding_mask = noisy.new_ones(1, 1, lat_h, lat_w)
+
+            feat_holder: dict[str, Tensor] = {}
+
+            def _hook(_module, _input, output):
+                feat_holder["feat"] = output.detach()
+
+            block = self.transformer.transformer_blocks[self._feat_block_idx]
+            handle = block.register_forward_hook(_hook)
+            try:
+                self.transformer(
+                    hidden_states=noisy,
+                    timestep=torch.full((b,), self._timestep, device=device, dtype=torch.long),
+                    encoder_hidden_states=text_embed,
+                    padding_mask=padding_mask,
+                )
+            finally:
+                handle.remove()
+
+            if "feat" not in feat_holder:
+                raise RuntimeError(
+                    f"DreamDojo forward hook failed to capture multi-frame features at block {self._feat_block_idx}."
+                )
+
+            feats = feat_holder["feat"]  # [B, T_lat * grid_h * grid_w, feat_dim]
+
+            # Cosmos patch_size=(1,2,2): grid = lat_size / patch_spatial
+            p_h, p_w = _COSMOS_2B_CONFIG["patch_size"][1], _COSMOS_2B_CONFIG["patch_size"][2]
+            grid_h, grid_w = lat_h // p_h, lat_w // p_w
+            expected = t_lat * grid_h * grid_w
+            if feats.shape[1] != expected:
+                raise RuntimeError(
+                    f"Unexpected token count: {feats.shape[1]} "
+                    f"(expected {expected} = T_lat={t_lat} * {grid_h}*{grid_w})."
+                )
+
+            feats = feats.view(b, t_lat, grid_h, grid_w, feats.shape[-1])
+            last_slot = feats[:, -1]  # [B, grid_h, grid_w, feat_dim]
+
+            last_slot = last_slot.permute(0, 3, 1, 2).contiguous()  # [B, feat_dim, grid_h, grid_w]
+            pooled = F.adaptive_avg_pool2d(last_slot, output_size=(self._output_spatial, self._output_spatial))
+            pooled = pooled.permute(0, 2, 3, 1).reshape(b, self._output_spatial**2, -1).contiguous()
+
+            del noise, noisy, hidden_states, latents, flat, x_video
+            return pooled
+
+    # ------------------------------------------------------------------
     # Scheduler helpers
     # ------------------------------------------------------------------
 
@@ -272,7 +390,7 @@ class DreamDojoTower(BaseTower):
 
 
 def _find_checkpoint(checkpoint_dir: str) -> str | None:
-    """Locate a DreamDojo .pt checkpoint file in checkpoint_dir."""
+    """Locate a Cosmos-family .pt checkpoint file in checkpoint_dir."""
     if not os.path.isdir(checkpoint_dir):
         return None
 
@@ -321,7 +439,7 @@ def _load_vae(vae_dir: str, dtype: str):
 
 
 def _load_transformer(ckpt_path: str, dtype: str):
-    """Instantiate CosmosTransformer3DModel and load DreamDojo weights.
+    """Instantiate CosmosTransformer3DModel and load Cosmos-family weights.
 
     Uses diffusers' built-in Cosmos key conversion to map NVIDIA-native
     key names (net.blocks.*, net.x_embedder.*, etc.) to diffusers format
@@ -335,7 +453,7 @@ def _load_transformer(ckpt_path: str, dtype: str):
 
     transformer = CosmosTransformer3DModel(**_COSMOS_2B_CONFIG)
 
-    logger.info("Loading DreamDojo checkpoint from %s ...", ckpt_path)
+    logger.info("Loading Cosmos checkpoint from %s ...", ckpt_path)
     try:
         raw_sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     except Exception:
@@ -350,7 +468,7 @@ def _load_transformer(ckpt_path: str, dtype: str):
 
     loaded_count = len(converted_sd) - len(result.unexpected_keys)
     logger.info(
-        "DreamDojo loaded: %d matched, %d missing, %d action keys skipped, %d other unexpected",
+        "Cosmos loaded: %d matched, %d missing, %d action keys skipped, %d other unexpected",
         loaded_count,
         len(result.missing_keys),
         len(action_keys),

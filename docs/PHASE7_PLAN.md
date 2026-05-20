@@ -1,7 +1,7 @@
 # Phase 7: DreamDojo Training Setup — Full Plan
 
 **Last updated:** 2026-05-20
-**Status:** Complete. All sub-phases 7.0–7.6 done.
+**Status:** Complete. All sub-phases 7.0–7.7 done.
 
 ---
 
@@ -30,7 +30,7 @@ Phase 7 brings DreamDojo to the same training-readiness as WAN on the main branc
 |---|----------|-------|-----|
 | 1 | Target dataset | LIBERO (not B1K) | Match WAN training for apples-to-apples comparison |
 | 2 | feat_dim | 2048 (auto-derived) | 16 heads × 128 dim confirmed in Phase 6 investigation |
-| 3 | Precompute mode | Single-frame (T=1) | Multi-frame windowing deferred pending Cosmos temporal attention investigation |
+| 3 | Precompute mode | Multi-frame (window=17, stride=2) | Matches WAN config. Cosmos VAE + Transformer natively handle T>1; `encode_window_batch` extracts last temporal slot |
 | 4 | Batch size (in-process) | 4 | DreamDojo 2B is ~50% larger than WAN 1.3B; 4 vs WAN's 8 |
 | 5 | Batch size (precomputed) | 64 | Matches WAN precomp — no tower in GPU memory |
 | 6 | Two configs (no semonly) | in-process / precomp | WAN semonly already serves as shared control — force_gate=1.0 zeros generative features regardless of tower |
@@ -47,6 +47,7 @@ Phase 7 brings DreamDojo to the same training-readiness as WAN on the main branc
 7.4  LIBERO training configs      DONE     src/openpi/training/config.py (2 new configs)
 7.5  B1K config fix               DONE     Commented out B1K DreamDojo configs (LeRobotB1KDataConfig disabled)
 7.6  Documentation                DONE     docs/ (this file + CHANGELOG + TEST_STATUS)
+7.7  Base Cosmos control backbone DONE     Registry alias + 2 LIBERO configs + precompute support
 ```
 
 ### Dependency Graph
@@ -70,6 +71,9 @@ auto       script     adaptation
             │
             ▼
            7.6  Documentation
+            │
+            ▼
+           7.7  Base Cosmos control backbone
 ```
 
 ---
@@ -103,6 +107,10 @@ Three changes to `scripts/precompute_tower_features.py`:
 2. Made `prepare_image()` accept configurable resolution (default 224 for backward compat, DreamDojo uses 256)
 3. Resolved `image_resolution` from tower kwargs so DreamDojo images go directly to 256×256
 
+### 7.3b — Multi-frame `encode_window_batch` on DreamDojoTower
+
+Added `encode_window_batch` override to `DreamDojoTower` (~50 lines). Follows WAN's temporal windowing pattern: runs full T-frame clip through Cosmos video VAE and DiT with cross-frame temporal attention, hooks intermediate block, extracts last temporal latent slot, pools to output_spatial grid. Verified with T=17 on real checkpoint — output `(1, 256, 2048)` matches single-frame contract.
+
 ### 7.4 — LIBERO training configs
 
 Two new configs in `src/openpi/training/config.py`:
@@ -120,6 +128,21 @@ Both mirror WAN configs exactly: same LR (1e-5), same steps (30K), same optimize
 
 The two B1K DreamDojo configs from Phase 6 (`pi05_b1k_dreamdojo`, `pi05_b1k_dreamdojo_wrist`) referenced `LeRobotB1KDataConfig`, which is commented out on main (along with its `b1k_policy` import). This caused a `NameError` at import time, crashing the entire config module. Both configs are now commented out with inline re-enable instructions — search "DISABLED: LeRobotB1KDataConfig" in `config.py`.
 
+### 7.7 — Base Cosmos control backbone
+
+**Why:** If DreamDojo beats WAN, is it architecture (Cosmos vs. WAN) or fine-tuning (44k hours egocentric video)? Base Cosmos isolates the variable. If base Cosmos also beats WAN → architecture wins. If only DreamDojo beats WAN → fine-tuning wins.
+
+**Key finding:** DreamDojo and base Cosmos-Predict2.5-2B are architecturally identical (`in_channels=17`). Channel 17 is a condition video input mask (not an action channel). Actions enter via MLP embedders, not channels. Both checkpoints use NVIDIA-native `.pt` format needing DCP key conversion.
+
+**Approach:** `"cosmos_base"` is a registry alias pointing to `DreamDojoTower` (same class). Configs differ only in `checkpoint_dir`. No subclass, no `use_action_channel` flag, no code duplication.
+
+Changes:
+1. `__init__.py`: `"cosmos_base"` → `DreamDojoTower` in registry
+2. `pi0_config.py`: `cosmos_base` added to feat_dim auto-derive (2048)
+3. `config.py`: 2 new LIBERO configs (`pi05_libero_lora_cosmos_base`, `pi05_libero_lora_cosmos_base_precomp`)
+4. `precompute_tower_features.py`: `ensure_cosmos_base_checkpoint()` with HF download guidance
+5. `dreamdojo_tower.py`: comments corrected from "action channel" to "condition mask"
+
 ---
 
 ## Files Modified (Complete List)
@@ -133,8 +156,12 @@ The two B1K DreamDojo configs from Phase 6 (`pi05_b1k_dreamdojo`, `pi05_b1k_drea
 | `src/openpi/training/config.py` | 2 new LIBERO DreamDojo configs | 7.4 |
 | `docs/PHASE7_PLAN.md` | New: this file | 7.5 |
 | `src/openpi/training/config.py` | Commented out B1K DreamDojo configs (NameError fix) | 7.5 |
-| `docs/CHANGELOG.md` | Phase 7 entries | 7.6 |
-| `docs/TEST_STATUS.md` | Phase 7 test tables | 7.6 |
+| `docs/CHANGELOG.md` | Phase 7 entries | 7.6, 7.7 |
+| `docs/TEST_STATUS.md` | Phase 7 test tables | 7.6, 7.7 |
+| `src/openpi_vega3d/towers/__init__.py` | `cosmos_base` registry alias → `DreamDojoTower` | 7.7 |
+| `src/openpi_vega3d/towers/dreamdojo_tower.py` | "action channel" → "condition mask" comments | 7.7 |
+| `scripts/precompute_tower_features.py` | `ensure_cosmos_base_checkpoint()` | 7.7 |
+| `src/openpi/training/config.py` | 2 new LIBERO base Cosmos configs | 7.7 |
 
 ---
 

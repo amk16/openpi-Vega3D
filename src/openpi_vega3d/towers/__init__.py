@@ -19,6 +19,7 @@ class _LazyRegistry(dict):
         "vae": ("openpi_vega3d.towers.vae_tower", "VAETower"),
         "wan_t2v": ("openpi_vega3d.towers.wan_tower", "WanT2VTower"),
         "dreamdojo": ("openpi_vega3d.towers.dreamdojo_tower", "DreamDojoTower"),
+        "cosmos_base": ("openpi_vega3d.towers.dreamdojo_tower", "DreamDojoTower"),
     }
 
     def __missing__(self, key):
