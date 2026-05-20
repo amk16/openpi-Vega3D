@@ -1,5 +1,6 @@
 import collections
 import dataclasses
+import json
 import logging
 import math
 import pathlib
@@ -17,6 +18,45 @@ import tyro
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
+SUITE_MAX_STEPS = {
+    # Standard LIBERO
+    "libero_spatial": 220,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+    # LIBERO-Pro: object perturbations
+    "libero_spatial_object": 220,
+    "libero_object_object": 280,
+    "libero_goal_object": 300,
+    "libero_10_object": 520,
+    # LIBERO-Pro: position (swap) perturbations
+    "libero_spatial_swap": 220,
+    "libero_object_swap": 280,
+    "libero_goal_swap": 300,
+    "libero_10_swap": 520,
+    # LIBERO-Pro: semantic (language) perturbations
+    "libero_spatial_lan": 220,
+    "libero_object_lan": 280,
+    "libero_goal_lan": 300,
+    "libero_10_lan": 520,
+    # LIBERO-Pro: task perturbations
+    "libero_spatial_task": 220,
+    "libero_object_task": 280,
+    "libero_goal_task": 300,
+    "libero_10_task": 520,
+    # LIBERO-Pro: environment perturbations
+    "libero_spatial_env": 220,
+    "libero_object_env": 280,
+    "libero_goal_env": 300,
+    "libero_10_env": 520,
+    # LIBERO-Pro: combined (temp) perturbations
+    "libero_spatial_temp": 220,
+    "libero_object_temp": 280,
+    "libero_goal_temp": 300,
+    "libero_10_temp": 520,
+}
+
 
 @dataclasses.dataclass
 class Args:
@@ -32,7 +72,7 @@ class Args:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = (
-        "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+        "libero_spatial"  # Task suite. See SUITE_MAX_STEPS for all valid options (standard + LIBERO-Pro).
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
@@ -57,23 +97,18 @@ def eval_libero(args: Args) -> None:
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
-    if args.task_suite_name == "libero_spatial":
-        max_steps = 220  # longest training demo has 193 steps
-    elif args.task_suite_name == "libero_object":
-        max_steps = 280  # longest training demo has 254 steps
-    elif args.task_suite_name == "libero_goal":
-        max_steps = 300  # longest training demo has 270 steps
-    elif args.task_suite_name == "libero_10":
-        max_steps = 520  # longest training demo has 505 steps
-    elif args.task_suite_name == "libero_90":
-        max_steps = 400  # longest training demo has 373 steps
-    else:
-        raise ValueError(f"Unknown task suite: {args.task_suite_name}")
+    max_steps = SUITE_MAX_STEPS.get(args.task_suite_name)
+    if max_steps is None:
+        raise ValueError(f"Unknown task suite: {args.task_suite_name}. Valid: {list(SUITE_MAX_STEPS.keys())}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
 
+    suite_video_dir = pathlib.Path(args.video_out_path) / args.task_suite_name
+    suite_video_dir.mkdir(parents=True, exist_ok=True)
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    per_task_results = {}
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
@@ -168,7 +203,7 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                suite_video_dir / f"rollout_{task_segment}_ep{episode_idx:03d}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
@@ -178,12 +213,33 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# episodes completed so far: {total_episodes}")
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
+        # Track per-task results
+        per_task_results[task_description] = {
+            "episodes": task_episodes,
+            "successes": task_successes,
+            "success_rate": float(task_successes) / float(task_episodes),
+        }
+
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+
+    # Save structured results to JSON
+    results = {
+        "suite": args.task_suite_name,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "success_rate": float(total_successes) / float(total_episodes),
+        "per_task": per_task_results,
+    }
+    results_dir = pathlib.Path(args.video_out_path).parent / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    with open(results_dir / f"{args.task_suite_name}_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    logging.info(f"Results saved to {results_dir / f'{args.task_suite_name}_results.json'}")
 
 
 def _get_libero_env(task, resolution, seed):
