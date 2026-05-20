@@ -4,8 +4,8 @@ set -euo pipefail
 
 # Defaults can be overridden with args:
 #   ./scripts/sync_tower_features_to_s3.sh [LOCAL_DIR] [S3_URI]
-LOCAL_DIR="${1:-tower_features}"
-S3_URI="${2:-s3://behavior-challenge/tower_features}"
+LOCAL_DIR="${1:-tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20}"
+S3_URI="${2:-s3://behavior-challenge/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-70}" # 70 seconds
 
 if ! command -v aws >/dev/null 2>&1; then

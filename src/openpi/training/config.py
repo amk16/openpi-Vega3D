@@ -1061,16 +1061,16 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (17 frames, stride 2,
+            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
+            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
             # covers ~33 frames of motion at 20Hz). The cache stores the *last
             # latent slot* per training frame so the schema matches single-frame.
             # Path includes the variant tag so different (window, stride, block)
             # caches don't collide.
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            tower_window=17,
-            tower_stride=2,
+            tower_window=1,
+            tower_stride=1,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
@@ -1142,10 +1142,10 @@ _CONFIGS = [
             # Identical cache as the WAN run -- ablation must use the *same*
             # features so the only varying knob is the gate. The features get
             # multiplied by (1-g)=0 anyway, so we just need a valid cache.
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w17s2_blk20",
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            tower_window=17,
-            tower_stride=2,
+            tower_window=1,
+            tower_stride=1,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
