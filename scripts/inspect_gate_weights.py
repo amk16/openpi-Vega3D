@@ -43,7 +43,32 @@ import math
 import pathlib
 import subprocess
 
+import boto3
 import numpy as np
+
+# Download tower features for val_episodes from S3 for both cameras
+S3_FEATURES_PREFIX = "tower_features/physical-intelligence_libero/wan_t2v_16x1536"
+S3_BUCKET = "behavior-challenge"
+CAMERAS = (
+    # "base_0_rgb",
+    "left_wrist_0_rgb",
+)
+
+# Local cache dir relative to the current working directory
+LOCAL_FEATURES_ROOT = pathlib.Path("./") / S3_FEATURES_PREFIX
+LOCAL_FEATURES_ROOT.mkdir(parents=True, exist_ok=True)
+
+# Setup S3 client with boto3 (assumes credentials are configured)
+s3 = boto3.client("s3")
+
+def download_safetensor_file(s3_bucket, s3_path, local_path):
+    # Downloads an S3 object to the local path, skip if exists
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    if local_path.exists():
+        print(f"[tower_features] Exists, skip: {local_path}")
+        return
+    print(f"[tower_features] Download: s3://{s3_bucket}/{s3_path} -> {local_path}")
+    s3.download_file(s3_bucket, s3_path, str(local_path))
 
 DEFAULT_S3 = (
     "s3://behavior-challenge/openpi_checkpoints/"
@@ -79,14 +104,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def sync_checkpoint(s3_uri: str, local_dir: pathlib.Path, *, skip: bool) -> pathlib.Path:
-    """Sync params/ and assets/ from the S3 checkpoint dir. Skips train_state/."""
+    """Sync params/ and assets/ from the S3 checkpoint dir. Skips train_state/.
+
+    Always re-runs ``aws s3 sync`` (which is idempotent: it only re-fetches
+    files whose size differs from S3). This repairs partial downloads from a
+    previously interrupted run -- those manifest as truncated zstd streams
+    that orbax cannot deserialize. Pass --skip-download to bypass entirely.
+    """
     local_dir.mkdir(parents=True, exist_ok=True)
     params_dir = local_dir / "params"
-    if params_dir.exists() and any(params_dir.iterdir()):
-        print(f"[ckpt] reusing cached checkpoint at {local_dir}")
-        return local_dir
     if skip:
-        raise SystemExit(f"[ckpt] --skip-download set but no params/ under {local_dir}")
+        if not (params_dir.exists() and any(params_dir.iterdir())):
+            raise SystemExit(f"[ckpt] --skip-download set but no params/ under {local_dir}")
+        print(f"[ckpt] --skip-download: trusting cached checkpoint at {local_dir}")
+        return local_dir
     base = s3_uri.rstrip("/")
     for sub in ("params", "assets"):
         src, dst = f"{base}/{sub}", local_dir / sub
@@ -124,7 +155,16 @@ def main() -> None:
         )
     # One batch in the main process: no need for the 20-worker training pool.
     config = dataclasses.replace(config, num_workers=0)
-    val_episodes = list(config.val_episodes_index)
+    val_episodes = list(config.val_episodes_index)[:10]
+    print(f"{val_episodes=}")
+
+    for camera in CAMERAS:
+        for ep_idx in val_episodes:
+            ep_fname = f"ep_{ep_idx:06d}.safetensors"
+            s3_ep_path = f"{S3_FEATURES_PREFIX}/{camera}/{ep_fname}"
+            local_ep_path = LOCAL_FEATURES_ROOT / camera / ep_fname
+            download_safetensor_file(S3_BUCKET, s3_ep_path, local_ep_path)
+
     print(f"[data] LIBERO validation split: {len(val_episodes)} held-out episodes "
           f"(episode indices {val_episodes[:5]}... every 20th)")
 
@@ -167,15 +207,40 @@ def main() -> None:
     # byte-identical to an un-instrumented run.
     # ------------------------------------------------------------------
     gate_records: list[np.ndarray] = []
+    logit_records: list[np.ndarray] = []
     orig_call = _agf.AdaptiveGatedFusion.__call__
 
     def recording_call(self, f_gen, f_sem):
+        # The model's params (and therefore f_gen / f_sem) are bfloat16. If we
+        # call sigmoid in bf16, anything with logit > ~6 rounds to exactly 1.0
+        # (bf16 has ~3 decimal digits), which hides the real gate value. So we
+        # upcast to float32 just for the peek -- the *actual* fused output is
+        # still produced by orig_call in whatever dtype the model normally uses.
         if self.force_gate is not None:
-            g = jnp.full((*f_gen.shape[:-1], 1), self.force_gate, dtype=f_gen.dtype)
+            g32 = jnp.full((*f_gen.shape[:-1], 1), self.force_gate, dtype=jnp.float32)
+            logit32 = jnp.full_like(g32, jnp.inf if self.force_gate == 1.0 else
+                                    (-jnp.inf if self.force_gate == 0.0 else
+                                     jnp.log(self.force_gate / (1.0 - self.force_gate))))
         else:
-            concat = jnp.concatenate([self.ln_gen(f_gen), self.ln_sem(f_sem)], axis=-1)
-            g = jax.nn.sigmoid(self.gate_proj(concat))
-        gate_records.append(np.asarray(jax.device_get(g), dtype=np.float32))
+            # Replicate the LN+linear+sigmoid math in float32 using the loaded
+            # bf16 params, upcast on the fly. Avoids re-invoking the bf16 NNX
+            # modules where sigmoid would saturate.
+            def _ln_f32(x, ln):
+                mean = x.mean(axis=-1, keepdims=True)
+                var = x.var(axis=-1, keepdims=True)
+                xhat = (x - mean) * jax.lax.rsqrt(var + ln.epsilon)
+                scale = ln.scale.value.astype(jnp.float32)
+                bias = ln.bias.value.astype(jnp.float32)
+                return xhat * scale + bias
+            fg32, fs32 = f_gen.astype(jnp.float32), f_sem.astype(jnp.float32)
+            concat = jnp.concatenate([_ln_f32(fg32, self.ln_gen),
+                                      _ln_f32(fs32, self.ln_sem)], axis=-1)
+            W = self.gate_proj.kernel.value.astype(jnp.float32)
+            b = self.gate_proj.bias.value.astype(jnp.float32)
+            logit32 = concat @ W + b
+            g32 = jax.nn.sigmoid(logit32)
+        gate_records.append(np.asarray(jax.device_get(g32), dtype=np.float32))
+        logit_records.append(np.asarray(jax.device_get(logit32), dtype=np.float32))
         return orig_call(self, f_gen, f_sem)
 
     _agf.AdaptiveGatedFusion.__call__ = recording_call
@@ -211,12 +276,14 @@ def main() -> None:
     for i, g in enumerate(gate_records):
         cam = camera_order[i] if i < len(camera_order) else f"call_{i}"
         flat = g.reshape(g.shape[0], -1)            # [B, N]  (N = 256 tokens)
+        logit_flat = logit_records[i].reshape(logit_records[i].shape[0], -1)
         n = flat.shape[1]
         side = int(round(math.sqrt(n)))
         gates.append({
             "camera": cam,
             "g": flat,                              # weight on F_sem (semantic)
             "p_gen_weight": 1.0 - flat,             # weight on F_gen (new P_gen/WAN)
+            "logit": logit_flat,                    # pre-sigmoid logit (float32)
             "g_grid": g.reshape(g.shape[0], side, side) if side * side == n else None,
         })
 
@@ -237,17 +304,21 @@ def main() -> None:
           "(zero at init; non-zero => gate is input-dependent)")
     all_pgen = []
     for gd in gates:
-        g, pg = gd["g"], gd["p_gen_weight"]
+        g, pg, lg = gd["g"], gd["p_gen_weight"], gd["logit"]
         all_pgen.append(pg.ravel())
         print(f"\n  camera: {gd['camera']}   (g shape per frame = {g.shape[1:]} tokens)")
+        print(f"    logit   (pre-sigmoid)    : "
+              f"mean={lg.mean():+.3f}  std={lg.std():.3f}  "
+              f"min={lg.min():+.3f}  max={lg.max():+.3f}  "
+              f"(init=+4.000; >~6 saturates bf16 sigmoid)")
         print(f"    g       (semantic weight): "
-              f"mean={g.mean():.4f}  std={g.std():.4f}  "
-              f"min={g.min():.4f}  max={g.max():.4f}")
+              f"mean={g.mean():.6f}  std={g.std():.6f}  "
+              f"min={g.min():.6f}  max={g.max():.6f}")
         print(f"    1 - g   (P_gen   weight) : "
-              f"mean={pg.mean():.4f}  std={pg.std():.4f}  "
-              f"min={pg.min():.4f}  max={pg.max():.4f}")
+              f"mean={pg.mean():.6f}  std={pg.std():.6f}  "
+              f"min={pg.min():.6f}  max={pg.max():.6f}")
         for q in (10, 50, 90, 99):
-            print(f"      P_gen weight  p{q:<2d} = {np.percentile(pg, q):.4f}")
+            print(f"      P_gen weight  p{q:<2d} = {np.percentile(pg, q):.6f}")
     overall = np.concatenate(all_pgen)
     print("\n  " + "-" * 70)
     print(f"  OVERALL mean P_gen weight (1 - g) = {overall.mean():.4f}")
@@ -262,10 +333,12 @@ def main() -> None:
     print(
         "\nDropping into breakpoint(). Inspect:\n"
         "  gates           - list of per-camera dicts: 'camera', 'g',\n"
-        "                    'p_gen_weight' (=1-g), 'g_grid' ([B,16,16] spatial map)\n"
+        "                    'p_gen_weight' (=1-g), 'logit', 'g_grid'\n"
         "  g_by_camera     - {camera: g array [B, N]}        (semantic weight)\n"
         "  pgen_by_camera  - {camera: 1-g array [B, N]}      (new P_gen weight)\n"
-        "  gate_records    - raw [B, N, 1] gate arrays in call order\n"
+        "  gate_records    - raw [B, N, 1] gate arrays in call order (float32)\n"
+        "  logit_records   - raw [B, N, 1] pre-sigmoid logits  (float32; tells\n"
+        "                    you whether g==1 is real or just bf16 saturation)\n"
         "  gate_bias       - learned gate_proj bias (init was +4.0)\n"
         "  gate_kernel     - learned gate_proj kernel [2*D_llm, 1]\n"
         "  G_INIT          - gate value at init (~0.982)\n"
