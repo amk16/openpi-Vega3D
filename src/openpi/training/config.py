@@ -985,7 +985,7 @@ _CONFIGS = [
         num_workers=16,
     ),
     TrainConfig(
-        name="pi05_libero_lora_wan",
+        name="pi05_libero_lora_wan_last_blk",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=10,
@@ -993,10 +993,60 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             use_vega3d=True,
+            vega3d_live_tower_for_inference=True,
+            vega3d_skip_tower_construction=False,
             vega3d_tower_name="wan_t2v",
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
                 "output_spatial": 16,
+                "feat_block_idx": -1,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_a_video_of_a_scene.pt",
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # WAN tower in-process: dropped from 64 to 8 to fit on a single 48GB GPU.
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan_blk20",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_live_tower_for_inference=True,
+            vega3d_skip_tower_construction=False,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+                "feat_block_idx": 20,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
@@ -1127,6 +1177,64 @@ _CONFIGS = [
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
             vega3d_skip_tower_construction=True,
+            # Pin the fusion gate to pure-semantic: fused = f_sem. The WAN
+            # stream contributes nothing and P_gen receives no gradient.
+            vega3d_force_gate=1.0,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            # Identical cache as the WAN run -- ablation must use the *same*
+            # features so the only varying knob is the gate. The features get
+            # multiplied by (1-g)=0 anyway, so we just need a valid cache.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=1,
+            tower_stride=1,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_wan_live_semonly_last_blk",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_live_tower_for_inference=True,
+            vega3d_skip_tower_construction=False,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+                "feat_block_idx": -1,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_a_video_of_a_scene.pt",
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
             # Pin the fusion gate to pure-semantic: fused = f_sem. The WAN
             # stream contributes nothing and P_gen receives no gradient.
             vega3d_force_gate=1.0,

@@ -15,7 +15,7 @@
 #       --checkpoint s3://behavior-challenge/checkpoints/pi05_libero_lora_wan_precomp/exp/30000 \
 #       [--port 8000] \
 #       [--server-timeout 600] \
-#       [--ckpt-cache-dir /workspace/.ckpt_cache] \
+#       [--ckpt-cache-dir checkpoints] \
 #       -- \
 #       --args.task-suite-name libero_spatial \
 #       --args.num-trials-per-task 10 \
@@ -40,7 +40,7 @@ CONFIG=""
 CHECKPOINT=""
 PORT=8000
 SERVER_TIMEOUT=600
-CKPT_CACHE_DIR="${LIBERO_CKPT_CACHE_DIR:-/workspace/.ckpt_cache}"
+CKPT_CACHE_DIR="${LIBERO_CKPT_CACHE_DIR:-checkpoints}"
 EVAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -134,7 +134,7 @@ echo "[run_libero_eval] server log     = $SERVER_LOG"
     # shellcheck disable=SC1091
     source "$MAIN_VENV/bin/activate"
     export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/packages/openpi-client/src:${PYTHONPATH:-}"
-    exec python "$SCRIPT_DIR/scripts/serve_policy.py" \
+    XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 exec python "$SCRIPT_DIR/scripts/serve_policy.py" \
         --port "$PORT" \
         policy:checkpoint \
         --policy.config "$CONFIG" \

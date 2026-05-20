@@ -25,9 +25,10 @@ RUN_SCRIPT="$SCRIPT_DIR/run_libero_eval.sh"
 #   checkpoint_dir — s3://, gs://, or local path. s3:// paths are synced into the
 #                    local checkpoint cache by run_libero_eval.sh before serving.
 RUNS=(
-    "wan_precomp|pi05_libero_lora_wan_precomp|s3://behavior-challenge/checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20/30000"
-    "lora_baseline|pi05_libero_lora|s3://behavior-challenge/checkpoints/pi05_libero_lora/lora_baseline_v1_w1s1_blk20/30000"
-    "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly_v1_w1s1_blk20/30000"
+    "wan_precomp_original|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/8000"
+    "wan_precomp_w1s1|pi05_libero_lora_wan_blk20|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20/8000"
+    "lora_baseline|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/8000"
+    "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly/8000"
 )
 
 SUITES=(
@@ -35,6 +36,14 @@ SUITES=(
     "libero_object"
     "libero_goal"
     "libero_10"
+    "libero_spatial_swap"
+    "libero_object_swap"
+    "libero_goal_swap"
+    "libero_10_swap"
+    "libero_spatial_object"
+    "libero_object_object"
+    "libero_goal_object"
+    "libero_10_object"
 )
 
 EXTRA_EVAL_ARGS=("$@")

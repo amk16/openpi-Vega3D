@@ -68,6 +68,12 @@ class Pi0Config(_model.BaseModelConfig):
     # the live tower forward path is never taken. Must stay False for any
     # eval/inference run that needs to compute features live from images.
     vega3d_skip_tower_construction: bool = False
+    # JAX-only: build a PyTorch spatial_tower inside `Pi0` and use it at
+    # inference time when observation.tower_features is missing. The torch
+    # tower runs on the host via jax.pure_callback (no autograd through the
+    # boundary) so the JAX sample_actions stays jitted. Eval-only knob --
+    # training paths always consume precomputed features from the dataloader.
+    vega3d_live_tower_for_inference: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:
