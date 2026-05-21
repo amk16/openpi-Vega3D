@@ -46,7 +46,7 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dea
 
 # System deps for MuJoCo + OpenGL rendering
 RUN apt-get update && apt-get install -y \
-    libosmesa6-dev libgl1-mesa-glx libegl1 libglew-dev \
+    libosmesa6-dev libgl1 libegl1 libglew-dev \
     libglfw3-dev libgles2-mesa-dev libglib2.0-0 \
     libsm6 libxrender1 libxext6 make g++ clang
 
