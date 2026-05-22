@@ -143,19 +143,20 @@ def train_step(
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
-    @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        result = model.compute_loss(rng, observation, actions, train=True)
+        if isinstance(result, dict):
+            return result["total_loss"], result
+        return jnp.mean(result), {}
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, aux_metrics), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(model, train_rng, observation, actions)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -188,6 +189,7 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    info.update(aux_metrics)
     return new_state, info
 
 
@@ -202,8 +204,10 @@ def val_step(
     model = nnx.merge(state.model_def, state.params)
     model.eval()
     observation, actions = batch
-    loss = jnp.mean(model.compute_loss(rng, observation, actions, train=False))
-    return {"val_loss": loss}
+    result = model.compute_loss(rng, observation, actions, train=False)
+    if isinstance(result, dict):
+        return {f"val_{k}": v for k, v in result.items()}
+    return {"val_loss": jnp.mean(result)}
 
 
 def main(config: _config.TrainConfig):

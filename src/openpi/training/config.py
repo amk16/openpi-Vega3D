@@ -155,7 +155,6 @@ class ModelTransformFactory(GroupFactory):
                     _transforms.TokenizePrompt(
                         _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                     ),
-                    _transforms.PadStatesAndActions(model_config.action_dim),
                 ]
                 if isinstance(model_config, pi0_config.Pi0Config) and model_config.use_fast_auxiliary:
                     inputs.append(
@@ -163,6 +162,7 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.FASTAuxiliaryTokenizer(model_config.fast_tokenizer_path),
                         )
                     )
+                inputs.append(_transforms.PadStatesAndActions(model_config.action_dim))
                 return _transforms.Group(inputs=inputs)
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
@@ -173,7 +173,6 @@ class ModelTransformFactory(GroupFactory):
                         _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                         discrete_state_input=model_config.discrete_state_input,
                     ),
-                    _transforms.PadStatesAndActions(model_config.action_dim),
                 ]
                 if model_config.use_fast_auxiliary:
                     inputs.append(
@@ -181,6 +180,7 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.FASTAuxiliaryTokenizer(model_config.fast_tokenizer_path),
                         )
                     )
+                inputs.append(_transforms.PadStatesAndActions(model_config.action_dim))
                 return _transforms.Group(inputs=inputs)
             case _model.ModelType.PI0_FAST:
                 tokenizer_cls = (

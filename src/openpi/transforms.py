@@ -293,13 +293,21 @@ class TokenizeFASTAuxiliary(DataTransformFn):
     """Encode actions as raw FAST codebook IDs for the auxiliary autoregressive loss."""
 
     tokenizer: _tokenizer.FASTAuxiliaryTokenizer
+    max_len: int = 64
 
     def __call__(self, data: DataDict) -> DataDict:
         actions = data.get("actions")
         if actions is None:
             return data
         fast_tokens = self.tokenizer.tokenize(actions)
-        fast_token_mask = np.ones(len(fast_tokens), dtype=bool)
+        num_tokens = len(fast_tokens)
+        if num_tokens < self.max_len:
+            pad_len = self.max_len - num_tokens
+            fast_tokens = np.concatenate([fast_tokens, np.zeros(pad_len, dtype=fast_tokens.dtype)])
+            fast_token_mask = np.concatenate([np.ones(num_tokens, dtype=bool), np.zeros(pad_len, dtype=bool)])
+        else:
+            fast_tokens = fast_tokens[: self.max_len]
+            fast_token_mask = np.ones(self.max_len, dtype=bool)
         return {**data, "fast_tokens": fast_tokens, "fast_token_mask": fast_token_mask}
 
 

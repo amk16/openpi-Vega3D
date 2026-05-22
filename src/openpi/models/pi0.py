@@ -401,6 +401,7 @@ class Pi0(_model.BaseModel):
 
             # FAST auxiliary loss from prefix output.
             fast_loss = None
+            fast_accuracy = None
             fast_len = 0
             if self.use_fast_auxiliary and observation.fast_tokens is not None:
                 fast_len = observation.fast_tokens.shape[1]
@@ -414,6 +415,9 @@ class Pi0(_model.BaseModel):
                 masked_loss = -target_log_probs * observation.fast_token_mask
                 num_valid = jnp.maximum(jnp.sum(observation.fast_token_mask, axis=-1), 1)
                 fast_loss = jnp.sum(masked_loss, axis=-1) / num_valid
+                pred_tokens = jnp.argmax(fast_logits, axis=-1)
+                correct = (pred_tokens == observation.fast_tokens) * observation.fast_token_mask
+                fast_accuracy = jnp.mean(jnp.sum(correct, axis=-1) / num_valid)
 
             # Strip FAST tokens from KV cache — the action expert should not
             # attend to auxiliary discrete-action tokens.
@@ -456,10 +460,16 @@ class Pi0(_model.BaseModel):
             )
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
             fast_loss = None
+            fast_accuracy = None
 
         action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
         if fast_loss is not None:
-            action_loss = action_loss + self.fast_loss_weight * fast_loss[:, None]
+            return {
+                "action_loss": jnp.mean(action_loss),
+                "fast_loss": jnp.mean(fast_loss),
+                "fast_accuracy": fast_accuracy,
+                "total_loss": jnp.mean(action_loss) + self.fast_loss_weight * jnp.mean(fast_loss),
+            }
         return action_loss
 
     @override

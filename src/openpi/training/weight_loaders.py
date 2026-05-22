@@ -53,7 +53,7 @@ class CheckpointWeightLoader(WeightLoader):
         # Backfill weights absent from base checkpoints so they keep their fresh
         # init from model construction: LoRA adapters, and the VEGA-3D fusion
         # modules (P_gen / P_sem / fusion) which are new top-level modules.
-        return _merge_params(loaded_params, params, missing_regex=r".*lora.*|(P_gen|P_sem|fusion)/.*")
+        return _merge_params(loaded_params, params, missing_regex=r".*lora.*|(P_gen|P_sem|fusion|fast_token_embedding|fast_token_proj)/.*")
 
 
 @dataclasses.dataclass(frozen=True)
