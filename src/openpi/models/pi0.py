@@ -110,11 +110,15 @@ class Pi0(_model.BaseModel):
             )
 
         # VEGA-3D Adaptive Gated Fusion (paper Eqs. 6-8). The spatial tower itself
-        # is PyTorch-only today (diffusers VAE / Wan T2V) and runs offline -- the
-        # JAX path consumes precomputed `observation.tower_features`. `spatial_tower`
-        # is reserved as a placeholder for a future JAX tower port.
+        # is PyTorch-only (diffusers VAE / Wan T2V). The JAX training path consumes
+        # precomputed `observation.tower_features` (computed offline). For eval
+        # inference, opt-in via `vega3d_live_tower_for_inference` to build the
+        # torch tower in-process; it runs on the host through jax.pure_callback
+        # when precomputed features are missing for a configured camera.
         self.use_vega3d = config.use_vega3d
         self.spatial_tower = None
+        self._tower_feat_dim = 0
+        self._tower_num_tokens = 0
         if self.use_vega3d:
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             feat_dim = config.vega3d_tower_feat_dim
@@ -124,6 +128,9 @@ class Pi0(_model.BaseModel):
                 hidden, force_gate=config.vega3d_force_gate, rngs=rngs
             )
             self._spatial_cameras = tuple(config.vega3d_cameras)
+            self._tower_feat_dim = feat_dim
+            tower_kwargs = dict(config.vega3d_tower_kwargs or {})
+            self._tower_num_tokens = int(tower_kwargs.get("output_spatial", 16)) ** 2
             logger.info(
                 "VEGA-3D fusion enabled: tower=%s (feat_dim=%d), cameras=%s, gate=%s",
                 config.vega3d_tower_name,
@@ -131,6 +138,23 @@ class Pi0(_model.BaseModel):
                 self._spatial_cameras,
                 "learned" if config.vega3d_force_gate is None else f"forced={config.vega3d_force_gate}",
             )
+            if config.vega3d_live_tower_for_inference:
+                from openpi_vega3d.towers import TOWER_REGISTRY
+                import torch as _torch
+
+                tower_cls = TOWER_REGISTRY[config.vega3d_tower_name]
+                spatial_tower = tower_cls(**tower_kwargs)
+                spatial_tower.freeze()
+                spatial_tower.eval()
+                if _torch.cuda.is_available():
+                    spatial_tower = spatial_tower.to("cuda")
+                # Bypass nnx.Module.__setattr__ — the torch module is not part
+                # of the JAX param tree and must stay opaque to NNX traversal.
+                object.__setattr__(self, "spatial_tower", spatial_tower)
+                logger.info(
+                    "VEGA-3D live torch tower constructed for inference (device=%s)",
+                    next(spatial_tower.parameters()).device,
+                )
         else:
             self.P_gen = None
             self.P_sem = None
@@ -157,6 +181,47 @@ class Pi0(_model.BaseModel):
         f_sem = self.P_sem(semantic_tokens)
         return self.fusion(f_gen, f_sem)
 
+    def _run_torch_tower_host(self, raw_image_nhwc):
+        """Host-side trampoline for jax.pure_callback.
+
+        Receives a numpy NHWC float image (materialized JAX array), runs the
+        torch tower on GPU if available, returns numpy [B, N, feat_dim] float32.
+        """
+        import numpy as _np
+        import torch as _torch
+
+        if self.spatial_tower is None:
+            raise RuntimeError("Live tower called but spatial_tower is None.")
+        img_np = _np.asarray(raw_image_nhwc)
+        if img_np.ndim != 4 or img_np.shape[-1] != 3:
+            raise ValueError(f"Tower expected [B, H, W, 3], got {img_np.shape}")
+        img_np = _np.transpose(img_np, (0, 3, 1, 2))  # NHWC -> NCHW
+        device = next(self.spatial_tower.parameters()).device
+        img_t = _torch.from_numpy(_np.ascontiguousarray(img_np)).to(device)
+        with _torch.inference_mode():
+            feats = self.spatial_tower.encode(img_t)
+        return feats.detach().to(_torch.float32).cpu().numpy()
+
+    def _live_tower_features(
+        self, raw_image: at.Array, num_tokens: int
+    ) -> at.Array:
+        """Run the torch spatial tower from inside a JIT'd JAX call.
+
+        Uses jax.pure_callback so the JIT trace stays valid: the callback
+        receives concrete numpy arrays at runtime and returns a JAX array of
+        the declared shape.
+        """
+        batch = raw_image.shape[0]
+        out_shape = jax.ShapeDtypeStruct(
+            (batch, num_tokens, self._tower_feat_dim), jnp.float32
+        )
+        return jax.pure_callback(
+            self._run_torch_tower_host,
+            out_shape,
+            raw_image,
+            vmap_method="sequential",
+        )
+
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
@@ -168,15 +233,26 @@ class Pi0(_model.BaseModel):
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
-            # VEGA-3D: fuse precomputed spatial-tower features into this stream
-            # when configured. Tower features come from the dataloader (or a
-            # future JAX tower) and must have the same token count as SigLIP.
+            # VEGA-3D: fuse spatial-tower features into this stream when
+            # configured. Features come either from the dataloader (training,
+            # precomputed) or, when missing, from a live torch tower invoked
+            # through jax.pure_callback (inference-only opt-in via
+            # vega3d_live_tower_for_inference).
             if self.use_vega3d and name in self._spatial_cameras:
-                if obs.tower_features is None or name not in obs.tower_features:
-                    raise ValueError(
-                        f"use_vega3d=True but observation.tower_features is missing camera {name!r}"
+                gen_feats = None
+                if obs.tower_features is not None and name in obs.tower_features:
+                    gen_feats = obs.tower_features[name]
+                if gen_feats is None:
+                    if self.spatial_tower is None:
+                        raise ValueError(
+                            f"use_vega3d=True but observation.tower_features is missing "
+                            f"camera {name!r} and no live tower was constructed "
+                            "(set vega3d_live_tower_for_inference=True for eval)."
+                        )
+                    gen_feats = self._live_tower_features(
+                        obs.images[name], image_tokens.shape[1]
                     )
-                image_tokens = self._fuse_camera(obs.tower_features[name], image_tokens)
+                image_tokens = self._fuse_camera(gen_feats, image_tokens)
 
             tokens.append(image_tokens)
             input_mask.append(
