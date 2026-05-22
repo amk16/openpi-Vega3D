@@ -345,8 +345,7 @@ class Pi0(_model.BaseModel):
             preprocess_rng,
             observation,
             train=train,
-            skip_spatial_aug_cameras=(),
-            # skip_spatial_aug_cameras=self._spatial_cameras if self.use_vega3d else (),
+            skip_spatial_aug_cameras=self._spatial_cameras if self.use_vega3d else (),
         )
 
         batch_shape = actions.shape[:-2]
