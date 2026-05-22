@@ -149,29 +149,39 @@ class ModelTransformFactory(GroupFactory):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI0:
-                return _transforms.Group(
-                    inputs=[
-                        _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                        ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
-                    ],
-                )
+                inputs = [
+                    _transforms.InjectDefaultPrompt(self.default_prompt),
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizePrompt(
+                        _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    ),
+                    _transforms.PadStatesAndActions(model_config.action_dim),
+                ]
+                if isinstance(model_config, pi0_config.Pi0Config) and model_config.use_fast_auxiliary:
+                    inputs.append(
+                        _transforms.TokenizeFASTAuxiliary(
+                            _tokenizer.FASTAuxiliaryTokenizer(model_config.fast_tokenizer_path),
+                        )
+                    )
+                return _transforms.Group(inputs=inputs)
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
-                return _transforms.Group(
-                    inputs=[
-                        _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
-                        ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
-                    ],
-                )
+                inputs = [
+                    _transforms.InjectDefaultPrompt(self.default_prompt),
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizePrompt(
+                        _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                        discrete_state_input=model_config.discrete_state_input,
+                    ),
+                    _transforms.PadStatesAndActions(model_config.action_dim),
+                ]
+                if model_config.use_fast_auxiliary:
+                    inputs.append(
+                        _transforms.TokenizeFASTAuxiliary(
+                            _tokenizer.FASTAuxiliaryTokenizer(model_config.fast_tokenizer_path),
+                        )
+                    )
+                return _transforms.Group(inputs=inputs)
             case _model.ModelType.PI0_FAST:
                 tokenizer_cls = (
                     _tokenizer.FASTTokenizer
@@ -983,6 +993,84 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
         num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_libero_deeplora_ki_ar",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+            use_knowledge_insulation=True,
+            use_fast_auxiliary=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            # normalization_stats_path="assets/pi05_libero/physical-intelligence/libero/norm_stats.json",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=30_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Same held-out validation split and S3 checkpoint streaming as the
+        # WAN variant, so the baseline and WAN runs are directly comparable.
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=32,
+    ),
+    TrainConfig(
+        name="pi05_libero_deeplora_ki_ar_wan_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+            use_knowledge_insulation=True,
+            use_fast_auxiliary=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            # normalization_stats_path="assets/pi05_libero/physical-intelligence/libero/norm_stats.json",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=30_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Same held-out validation split and S3 checkpoint streaming as the
+        # WAN variant, so the baseline and WAN runs are directly comparable.
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=32,
     ),
     TrainConfig(
         name="pi05_libero_lora_wan_last_blk",

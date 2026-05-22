@@ -109,6 +109,22 @@ class Pi0(_model.BaseModel):
                 "Task embeddings enabled: %d tasks, scale=%s", self.num_tasks, self.task_embedding_scale
             )
 
+        # Knowledge Insulation & FAST auxiliary token loss.
+        self.use_knowledge_insulation = config.use_knowledge_insulation
+        self.use_fast_auxiliary = config.use_fast_auxiliary
+        if config.use_fast_auxiliary:
+            self.fast_token_embedding = nnx.Embed(
+                config.fast_vocab_size, paligemma_config.width, rngs=rngs
+            )
+            self.fast_token_proj = nnx.Linear(
+                paligemma_config.width, config.fast_vocab_size, rngs=rngs
+            )
+            self.fast_loss_weight = config.fast_loss_weight
+            logger.info(
+                "FAST auxiliary enabled: vocab_size=%d, loss_weight=%s",
+                config.fast_vocab_size, config.fast_loss_weight,
+            )
+
         # VEGA-3D Adaptive Gated Fusion (paper Eqs. 6-8). The spatial tower itself
         # is PyTorch-only (diffusers VAE / Wan T2V). The JAX training path consumes
         # precomputed `observation.tower_features` (computed offline). For eval
@@ -272,6 +288,21 @@ class Pi0(_model.BaseModel):
             input_mask.append(obs.tokenized_prompt_mask)
             # full attention between image and language inputs
             ar_mask += [False] * tokenized_inputs.shape[1]
+
+        # FAST auxiliary tokens (training only, for Knowledge Insulation).
+        # Appended at the end of the prefix with causal (autoregressive)
+        # masking so the VLM predicts each FAST token from all preceding
+        # context. Image/language tokens cannot attend to FAST tokens.
+        if self.use_fast_auxiliary and obs.fast_tokens is not None:
+            bos = jnp.zeros((obs.fast_tokens.shape[0], 1), dtype=jnp.int32)
+            shifted = jnp.concatenate([bos, obs.fast_tokens[:, :-1]], axis=1)
+            bos_mask = jnp.ones((obs.fast_tokens.shape[0], 1), dtype=jnp.bool_)
+            shifted_mask = jnp.concatenate([bos_mask, obs.fast_token_mask[:, :-1]], axis=1)
+            fast_emb = self.fast_token_embedding(shifted)
+            tokens.append(fast_emb)
+            input_mask.append(shifted_mask)
+            ar_mask += [True] * shifted.shape[1]
+
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -355,19 +386,81 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if self.use_knowledge_insulation or self.use_fast_auxiliary:
+            # Two-pass forward: prefix → KV cache → suffix.  Required for
+            # knowledge insulation (stop-gradient on cache) and/or FAST
+            # auxiliary loss (cross-entropy on prefix output).
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            (prefix_out, _), kv_cache = self.PaliGemma.llm(
+                [prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions
+            )
+
+            # FAST auxiliary loss from prefix output.
+            fast_loss = None
+            fast_len = 0
+            if self.use_fast_auxiliary and observation.fast_tokens is not None:
+                fast_len = observation.fast_tokens.shape[1]
+                fast_start = prefix_tokens.shape[1] - fast_len
+                fast_out = prefix_out[:, fast_start:, :]
+                fast_logits = self.fast_token_proj(fast_out)
+                log_probs = jax.nn.log_softmax(fast_logits, axis=-1)
+                target_log_probs = jnp.take_along_axis(
+                    log_probs, observation.fast_tokens[:, :, None], axis=-1
+                ).squeeze(-1)
+                masked_loss = -target_log_probs * observation.fast_token_mask
+                num_valid = jnp.maximum(jnp.sum(observation.fast_token_mask, axis=-1), 1)
+                fast_loss = jnp.sum(masked_loss, axis=-1) / num_valid
+
+            # Strip FAST tokens from KV cache — the action expert should not
+            # attend to auxiliary discrete-action tokens.
+            if fast_len > 0:
+                cache_k, cache_v = kv_cache
+                kv_cache = (cache_k[:, :, :-fast_len, :, :], cache_v[:, :, :-fast_len, :, :])
+                prefix_mask = prefix_mask[:, :-fast_len]
+
+            # Knowledge insulation: sever gradient flow from action expert
+            # back into the VLM.
+            if self.use_knowledge_insulation:
+                kv_cache = jax.tree.map(jax.lax.stop_gradient, kv_cache)
+
+            # Suffix forward pass with cached prefix.
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_for_suffix = einops.repeat(
+                prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1]
+            )
+            full_attn_mask = jnp.concatenate([prefix_attn_for_suffix, suffix_attn_mask], axis=-1)
+            suffix_positions = (
+                jnp.sum(prefix_mask, axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask, axis=-1) - 1
+            )
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=suffix_positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+        else:
+            # Original single-pass forward.
+            input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+            ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+            attn_mask = make_attn_mask(input_mask, ar_mask)
+            positions = jnp.cumsum(input_mask, axis=1) - 1
+            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            fast_loss = None
+
+        action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if fast_loss is not None:
+            action_loss = action_loss + self.fast_loss_weight * fast_loss[:, None]
+        return action_loss
 
     @override
     def sample_actions(

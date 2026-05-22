@@ -44,6 +44,22 @@ class Pi0Config(_model.BaseModelConfig):
     num_tasks: int = 0
     task_embedding_scale: float = 1.0
 
+    # Knowledge Insulation (arXiv:2505.23705): stop gradients from the action
+    # expert back through the VLM KV cache so the backbone is trained only via
+    # the FAST auxiliary loss (or kept frozen if use_fast_auxiliary=False).
+    use_knowledge_insulation: bool = False
+
+    # FAST auxiliary token loss: autoregressive cross-entropy on discretized
+    # action tokens appended to the VLM prefix. Provides a discrete training
+    # signal that preserves pretrained knowledge when KI is active.
+    use_fast_auxiliary: bool = False
+    # Auto-derived from fast_tokenizer_path in __post_init__ (4096 for the
+    # standard physical-intelligence/fast codebook). Set explicitly only when
+    # using a non-standard tokenizer.
+    fast_vocab_size: int | None = None
+    fast_tokenizer_path: str = "physical-intelligence/fast"
+    fast_loss_weight: float = 1.0
+
     # VEGA-3D Adaptive Gated Fusion (Phase 3; paper Eqs. 6-8)
     # When use_vega3d=True, base-camera image tokens are replaced by a gated fusion
     # of generative tower features (P_gen(tower(img))) and PaliGemma's own image
@@ -97,6 +113,14 @@ class Pi0Config(_model.BaseModelConfig):
                 raise ValueError(
                     f"Cannot auto-derive vega3d_tower_feat_dim for tower {self.vega3d_tower_name!r}; "
                     "set vega3d_tower_feat_dim explicitly."
+                )
+        if self.use_fast_auxiliary and self.fast_vocab_size is None:
+            if self.fast_tokenizer_path == "physical-intelligence/fast":
+                object.__setattr__(self, "fast_vocab_size", 4096)
+            else:
+                raise ValueError(
+                    f"Cannot auto-derive fast_vocab_size for tokenizer {self.fast_tokenizer_path!r}; "
+                    "set fast_vocab_size explicitly."
                 )
 
     @property

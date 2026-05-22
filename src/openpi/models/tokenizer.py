@@ -48,6 +48,28 @@ class PaligemmaTokenizer:
         return np.asarray(tokens), np.asarray(mask)
 
 
+class FASTAuxiliaryTokenizer:
+    """Tokenizer for FAST auxiliary loss (Knowledge Insulation).
+
+    Returns raw FAST codebook IDs (not mapped into PaliGemma vocab) for the
+    separate fast_token_embedding used by Pi0's FAST auxiliary head.
+    """
+
+    def __init__(self, fast_tokenizer_path: str = "physical-intelligence/fast"):
+        self._tokenizer = AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
+
+    def tokenize(self, actions: np.ndarray) -> np.ndarray:
+        """Encode continuous actions into raw FAST token IDs.
+
+        Args:
+            actions: [horizon, dim] continuous actions (normalized).
+
+        Returns:
+            1-D int array of codebook IDs.
+        """
+        return np.asarray(self._tokenizer(actions[None])[0])
+
+
 class FASTTokenizer:
     def __init__(self, max_len: int = 256, fast_tokenizer_path: str = "physical-intelligence/fast"):
         self._max_len = max_len
