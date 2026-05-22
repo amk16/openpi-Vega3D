@@ -1075,7 +1075,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         # No WAN in-process: same batch budget as the non-VEGA libero run.
-        batch_size=64,
+        batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             # 1e-5 is conservative for batch 64: the validated pi05_libero
@@ -1149,7 +1149,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
-        batch_size=64,
+        batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=1e-5,

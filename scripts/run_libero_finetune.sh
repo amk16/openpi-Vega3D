@@ -29,22 +29,22 @@ source /venv/main/bin/activate
 echo "[run_libero_finetune] $(date) starting WAN run (pi05_libero_lora_wan_precomp)"
 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_lora_wan_precomp \
-    --exp-name=wan_precomp_v1_w1s1_blk20 \
+    --exp-name=wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS \
     --overwrite
 echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 
-# ---- Run 2: plain pi05 LoRA baseline (no VEGA) ----
-echo "[run_libero_finetune] $(date) starting baseline run (pi05_libero_lora)"
-HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-    pi05_libero_lora \
-    --exp-name=lora_baseline_v1_w1s1_blk20 \
-    --overwrite
-echo "[run_libero_finetune] $(date) baseline run exited with code $?"
+# # ---- Run 2: plain pi05 LoRA baseline (no VEGA) ----
+# echo "[run_libero_finetune] $(date) starting baseline run (pi05_libero_lora)"
+# HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
+#     pi05_libero_lora \
+#     --exp-name=lora_baseline_v1_w1s1_blk20_NO_INIT_BIAS \
+#     --overwrite
+# echo "[run_libero_finetune] $(date) baseline run exited with code $?"
 
 # ---- Run 3: WAN ablation control (VEGA architecture, WAN gated off) ----
 echo "[run_libero_finetune] $(date) starting WAN-control run (pi05_libero_lora_wan_precomp_semonly)"
 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_lora_wan_precomp_semonly \
-    --exp-name=wan_precomp_semonly_v1_w1s1_blk20 \
+    --exp-name=wan_precomp_semonly_v1_w1s1_blk20_NO_INIT_BIAS \
     --overwrite
 echo "[run_libero_finetune] $(date) WAN-control run exited with code $?"
