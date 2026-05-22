@@ -59,8 +59,7 @@ RUN git clone https://github.com/Zxy-MLlab/LIBERO-PRO.git /opt/libero-pro
 
 # Install LIBERO-Pro deps + package
 COPY examples/libero/requirements.txt /tmp/requirements-libero.txt
-RUN /venv/libero/bin/pip3 install -r /tmp/requirements-libero.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu113
+RUN /venv/libero/bin/pip3 install --no-cache-dir -r /tmp/requirements-libero.txt --extra-index-url https://download.pytorch.org/whl/cu113
 RUN /venv/libero/bin/pip3 install -e /opt/libero-pro
 
 # Install openpi-client in libero venv (for websocket connection)
