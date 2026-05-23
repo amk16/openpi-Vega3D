@@ -228,6 +228,10 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=None,
                         help="Frame stride within the window. e.g. window=17 stride=2 covers 33 real "
                              "frames of motion (~1.6s at 20Hz). Default: config.data.tower_stride or 1.")
+    parser.add_argument("--prompt_cache", default=None,
+                        help="Path to precomputed T5 prompt embeddings (.pt) from "
+                             "export_cosmos_prompt_embeddings.py. When provided, each episode's "
+                             "task prompt is looked up and passed as text conditioning to the tower.")
     args = parser.parse_args()
 
     config = get_config(args.config_name)
@@ -303,6 +307,24 @@ def main() -> None:
     if args.limit_episodes is not None:
         unique_eps = unique_eps[: args.limit_episodes]
 
+    # Prompt cache: load precomputed T5 embeddings and build episode → embedding map.
+    prompt_cache = None
+    ep_to_text_embed: dict[int, torch.Tensor] = {}
+    if args.prompt_cache:
+        from openpi_vega3d.towers.prompt_cache import PromptEmbeddingCache
+        prompt_cache = PromptEmbeddingCache(args.prompt_cache)
+        print(f"[precompute] Loaded prompt cache with {len(prompt_cache)} prompts")
+
+        task_index_arr = np.asarray(dataset.hf_dataset["task_index"])
+        task_map = dataset.meta.tasks  # {int: str}
+        for ep in unique_eps:
+            first_frame = np.where(episode_indices_arr == ep)[0][0]
+            task_idx = int(task_index_arr[first_frame])
+            task_str = task_map[task_idx]
+            ep_to_text_embed[ep] = prompt_cache[task_str]  # [seq_len, embed_dim]
+        unique_prompts_used = len({id(v) for v in ep_to_text_embed.values()})
+        print(f"[precompute] Mapped {len(ep_to_text_embed)} episodes to {unique_prompts_used} unique prompts")
+
     for cam in cameras:
         if cam not in LIBERO_CAMERA_TO_DATASET_KEY:
             raise ValueError(
@@ -317,7 +339,8 @@ def main() -> None:
     use_s3 = bool(args.s3_bucket)
     repo_sanitized = config.data.repo_id.replace("/", "_")
     feat_block_idx = int(tower_kwargs.get("feat_block_idx", -1))
-    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}_w{window}s{stride}_blk{feat_block_idx}"
+    text_tag = "_t5cond" if args.prompt_cache else ""
+    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}_w{window}s{stride}_blk{feat_block_idx}{text_tag}"
     s3_prefix = args.s3_prefix or f"tower_features/{repo_sanitized}/{variant_tag}"
 
     if use_s3:
@@ -352,6 +375,7 @@ def main() -> None:
         "stride": stride,
         "feat_block_idx": feat_block_idx,
         "extraction_mode": "multi_frame_last_slot" if multi_frame else "single_frame",
+        "text_conditioned": args.prompt_cache is not None,
     }
     (cache_root / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 
@@ -363,10 +387,20 @@ def main() -> None:
         n_frames_in_ep = len(frame_indices)
         per_cam_features: dict[str, list[torch.Tensor]] = {cam: [] for cam in cameras}
 
+        # Per-episode text embedding (same for every frame in the episode).
+        ep_text_embed = ep_to_text_embed.get(ep)  # None if no prompt cache
+
         for batch_start_pos in range(0, n_frames_in_ep, args.batch_size):
             batch_positions = list(
                 range(batch_start_pos, min(batch_start_pos + args.batch_size, n_frames_in_ep))
             )
+            actual_batch_size = len(batch_positions)
+
+            # Expand text embed to batch: [seq_len, dim] -> [B, seq_len, dim]
+            batch_text_embed = None
+            if ep_text_embed is not None:
+                batch_text_embed = ep_text_embed.unsqueeze(0).expand(actual_batch_size, -1, -1).to(device)
+
             # Build causal windows for each training frame in the batch.
             window_positions_per_item = [
                 build_window_positions(p, window, stride) for p in batch_positions
@@ -394,7 +428,7 @@ def main() -> None:
                 cam_idx = cameras_list.index(cam)
                 seed = (int(ep) * 1_000_003 + int(batch_start_pos) * 17 + cam_idx) % (2**31 - 1)
                 with torch.no_grad():
-                    feats = tower.encode_window_batch(clips, noise_seed=seed)  # [B, num_tokens, feat_dim]
+                    feats = tower.encode_window_batch(clips, noise_seed=seed, text_embed=batch_text_embed)
                 per_cam_features[cam].append(feats.detach().to(torch.bfloat16).cpu())
 
         for cam in cameras:

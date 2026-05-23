@@ -165,7 +165,14 @@ class DreamDojoTower(BaseTower):
     # Core encode
     # ------------------------------------------------------------------
 
-    def encode(self, images: Tensor) -> Tensor:
+    def encode(self, images: Tensor, *, text_embed: Tensor | None = None) -> Tensor:
+        """Encode images to spatial feature tokens.
+
+        Args:
+            images: [B, 3, H, W] input images.
+            text_embed: Optional [B, seq_len, 1024] precomputed T5 prompt
+                embedding. Falls back to null-text (zeros) when omitted.
+        """
         b = images.shape[0]
         device = images.device
 
@@ -208,8 +215,11 @@ class DreamDojoTower(BaseTower):
             tau = self._nearest_timestep(scheduler)
             noisy = scheduler.scale_noise(hidden_states, tau.expand(b), noise)
 
-            # Zero text embeddings (null-text conditioning)
-            text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
+            # Text conditioning: use provided embeddings or fall back to null-text.
+            if text_embed is not None:
+                text_embed = text_embed.to(device=device, dtype=pt_dtype)
+            else:
+                text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
 
             # Padding mask (all-ones = fully valid; batch=1 for internal broadcast)
             lat_h, lat_w = latents.shape[-2], latents.shape[-1]
@@ -253,7 +263,7 @@ class DreamDojoTower(BaseTower):
     # Multi-frame encode (precompute path)
     # ------------------------------------------------------------------
 
-    def encode_window_batch(self, clips: Tensor, noise_seed: int | None = None) -> Tensor:
+    def encode_window_batch(self, clips: Tensor, noise_seed: int | None = None, *, text_embed: Tensor | None = None) -> Tensor:
         """Multi-frame temporal window encoding, matching WAN's approach.
 
         Runs the full clip through the Cosmos video VAE and DiT with
@@ -263,6 +273,8 @@ class DreamDojoTower(BaseTower):
         Args:
             clips: [B, T, 3, H, W] — B clips of T raw frames each.
             noise_seed: deterministic noise for reproducible cached features.
+            text_embed: Optional [B, seq_len, 1024] precomputed T5 prompt
+                embedding. Falls back to null-text (zeros) when omitted.
 
         Returns:
             [B, output_spatial**2, feat_dim] — last-temporal-slot features
@@ -273,7 +285,7 @@ class DreamDojoTower(BaseTower):
         b, t, c_in, h_in, w_in = clips.shape
 
         if t == 1:
-            return self.encode(clips[:, 0])
+            return self.encode(clips[:, 0], text_embed=text_embed)
 
         if not self.online:
             return torch.zeros(
@@ -315,7 +327,11 @@ class DreamDojoTower(BaseTower):
             tau = self._nearest_timestep(scheduler)
             noisy = scheduler.scale_noise(hidden_states, tau.expand(b), noise)
 
-            text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
+            # Text conditioning: use provided embeddings or fall back to null-text.
+            if text_embed is not None:
+                text_embed = text_embed.to(device=device, dtype=pt_dtype)
+            else:
+                text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
             # Spatial-only mask; transformer broadcasts along T internally.
             padding_mask = noisy.new_ones(1, 1, lat_h, lat_w)
 
