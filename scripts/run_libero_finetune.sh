@@ -29,7 +29,7 @@ source /venv/main/bin/activate
 echo "[run_libero_finetune] $(date) starting WAN run (pi05_libero_deeplora_ki_ar)"
 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_deeplora_ki_ar \
-    --exp-name=libero_deeplora_ki_ar \
+    --exp-name=libero_deeplora_ki_ar_2nd \
     --overwrite
 echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 
@@ -37,7 +37,7 @@ echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 echo "[run_libero_finetune] $(date) starting WAN run (pi05_libero_deeplora_ki_ar)"
 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_deeplora_ki_ar_wan_precomp \
-    --exp-name=libero_deeplora_ki_ar_wan_precomp \
+    --exp-name=libero_deeplora_ki_ar_wan_precomp_fr \
     --overwrite
 echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 
