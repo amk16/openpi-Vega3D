@@ -1,8 +1,11 @@
 import dataclasses
 import functools
 import logging
+import os
 import platform
 from typing import Any
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import etils.epath as epath
 import flax.nnx as nnx
