@@ -28,9 +28,11 @@ RUN_SCRIPT="$SCRIPT_DIR/run_libero_eval.sh"
 # "wan_precomp_original|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/8000"
 # "wan_precomp_w1s1|pi05_libero_lora_wan_blk20|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20/8000"
 # "lora_baseline|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/8000"
+# "wan_precomp_w1s1_blk20_no_init_bias|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS/29999"
+# "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly_v1/8000"
 RUNS=(
-    "wan_precomp_w1s1_blk20_no_init_bias|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS/29999"
-    "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly_v1/8000"
+    "wan_precomp_original_30k_steps|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/29999"
+    "lora_baseline_30k_steps|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/29999"
 )
 
 SUITES=(
