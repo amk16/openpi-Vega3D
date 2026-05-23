@@ -1506,6 +1506,211 @@ _CONFIGS = [
         num_workers=16,
     ),
     #
+    # DreamDojo (Cosmos-Predict2.5-2B) LIBERO configs.
+    # Mirrors the WAN LIBERO configs above for apples-to-apples comparison.
+    # DreamDojo's 44k hours of egocentric human video may yield stronger
+    # geometric priors for manipulation tasks than WAN's text-to-video model.
+    #
+    TrainConfig(
+        name="pi05_libero_lora_dreamdojo",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="dreamdojo",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/DreamDojo-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        # DreamDojo 2B is ~50% larger than WAN 1.3B; batch=4 to fit on 48GB GPU.
+        batch_size=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_dreamdojo_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="dreamdojo",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/DreamDojo-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            # Multi-frame causal window matching WAN config (window=17,
+            # stride=2). Each training frame's DreamDojo feature is computed
+            # from a [f-32, f-30, ..., f-2, f] clip — Cosmos DiT temporal
+            # attention runs across the window, last latent slot kept.
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/dreamdojo_16x2048_w17s2_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    #
+    # ── Base Cosmos-Predict2.5-2B LIBERO configs ──────────────────────────
+    # Ablation control: same Cosmos architecture as DreamDojo but WITHOUT
+    # action-conditioning fine-tuning. Isolates architecture vs fine-tuning
+    # effects in WAN/DreamDojo/Cosmos comparisons.
+    #
+    TrainConfig(
+        name="pi05_libero_lora_cosmos_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="cosmos_base",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_lora_cosmos_base_precomp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_vega3d=True,
+            vega3d_tower_name="cosmos_base",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w17s2_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=17,
+            tower_stride=2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=16,
+    ),
+    #
     # Fine-tuning Aloha configs.
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.
@@ -1713,6 +1918,220 @@ _CONFIGS = [
     #             "checkpoint_dir": "ckpts/stable-diffusion-2-1-base",
     #         },
     #         vega3d_cameras=("base_0_rgb",),
+    #         vega3d_force_gate=None,
+    #     ),
+    #     data=LeRobotB1KDataConfig(
+    #         repo_id="behavior-1k/2025-challenge-demos",
+    #         base_config=DataConfig(
+    #             tasks=[
+    #                 "assembling_gift_baskets",
+    #                 "bringing_in_wood",
+    #                 "carrying_in_groceries",
+    #                 "chop_an_onion",
+    #                 "chopping_wood",
+    #                 "clean_a_patio",
+    #                 "cleaning_up_plates_and_food",
+    #                 "clearing_food_from_table_into_fridge",
+    #                 "hanging_pictures",
+    #                 "hiding_Easter_eggs",
+    #                 "loading_the_car",
+    #                 "make_microwave_popcorn",
+    #                 "make_pizza",
+    #                 "moving_boxes_to_storage",
+    #                 "picking_up_trash",
+    #                 "putting_away_Halloween_decorations",
+    #                 "putting_shoes_on_rack",
+    #                 "rearranging_kitchen_furniture",
+    #                 "setting_the_fire",
+    #                 "spraying_for_bugs",
+    #                 "spraying_fruit_trees",
+    #                 "turning_on_radio",
+    #             ],
+    #             prompt_from_task=False,
+    #             prompt_from_skill_annotations=True,
+    #             prompt_from_skill_annotations_use_base_prompt_pct=0.7,
+    #             proprio_dropout_dropout_whole_proprio_pct=0.1,
+    #             episodes_index=list(range(190)),
+    #             boundary_oversampling_factor=2,
+    #             boundary_window_frames=30,
+    #             behavior_dataset_root=None,
+    #         ),
+    #     ),
+    #     pytorch_weight_path="/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor",
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #     ).get_freeze_filter(),
+    #     num_train_steps=50_000,
+    #     batch_size=8,
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=1e-4,
+    #         decay_steps=50_000,
+    #         decay_lr=1e-6,
+    #     ),
+    #     ema_decay=None,
+    #     val_log_interval=2500,
+    #     val_repo_id="behavior-1k/2025-challenge-demos",
+    #     val_episodes_index=list(range(190, 200)),
+    #     assets_base_dir="./outputs/assets",
+    #     checkpoint_base_dir="./outputs/checkpoints",
+    #     num_workers=min(32, os.cpu_count() - 2),
+    # ),
+    #
+    # B1K + DreamDojo (Cosmos-Predict2.5-2B) adapter training config.
+    # Mirrors pi05_b1k_vega3d but uses the DreamDojo backbone for generative features.
+    # Base camera only — see pi05_b1k_dreamdojo_wrist for egocentric wrist cameras.
+    #
+    # DISABLED: LeRobotB1KDataConfig and b1k_policy are commented out on main.
+    # To re-enable: uncomment LeRobotB1KDataConfig (line ~591) and the
+    # b1k_policy import (line ~22), then uncomment this block.
+    #
+    # TrainConfig(
+    #     name="pi05_b1k_dreamdojo",
+    #     exp_name="openpi",
+    #     project_name="B1K-DreamDojo",
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #         loss_weighting_strategy="per_group",
+    #         action_groups={
+    #             "base": (0, 3),
+    #             "trunk": (3, 7),
+    #             "left_arm": (7, 14),
+    #             "left_gripper": (14, 15),
+    #             "right_arm": (15, 22),
+    #             "right_gripper": (22, 23),
+    #             "padding": (23, 32),
+    #         },
+    #         group_weights={
+    #             "base": 1.0,
+    #             "trunk": 1.7,
+    #             "left_arm": 2.0,
+    #             "left_gripper": 2.0,
+    #             "right_arm": 2.0,
+    #             "right_gripper": 2.0,
+    #             "padding": 0.0,
+    #         },
+    #         proprio_dropout_dropout_whole_proprio_pct=0.2,
+    #         num_tasks=50,
+    #         task_embedding_scale=1.5,
+    #         use_vega3d=True,
+    #         vega3d_tower_name="dreamdojo",
+    #         vega3d_tower_kwargs={
+    #             "checkpoint_dir": "ckpts/DreamDojo-2B",
+    #             "variant": "teacher",
+    #             "input_resolution": 256,
+    #         },
+    #         vega3d_cameras=("base_0_rgb",),
+    #         vega3d_force_gate=None,
+    #     ),
+    #     data=LeRobotB1KDataConfig(
+    #         repo_id="behavior-1k/2025-challenge-demos",
+    #         base_config=DataConfig(
+    #             tasks=[
+    #                 "assembling_gift_baskets",
+    #                 "bringing_in_wood",
+    #                 "carrying_in_groceries",
+    #                 "chop_an_onion",
+    #                 "chopping_wood",
+    #                 "clean_a_patio",
+    #                 "cleaning_up_plates_and_food",
+    #                 "clearing_food_from_table_into_fridge",
+    #                 "hanging_pictures",
+    #                 "hiding_Easter_eggs",
+    #                 "loading_the_car",
+    #                 "make_microwave_popcorn",
+    #                 "make_pizza",
+    #                 "moving_boxes_to_storage",
+    #                 "picking_up_trash",
+    #                 "putting_away_Halloween_decorations",
+    #                 "putting_shoes_on_rack",
+    #                 "rearranging_kitchen_furniture",
+    #                 "setting_the_fire",
+    #                 "spraying_for_bugs",
+    #                 "spraying_fruit_trees",
+    #                 "turning_on_radio",
+    #             ],
+    #             prompt_from_task=False,
+    #             prompt_from_skill_annotations=True,
+    #             prompt_from_skill_annotations_use_base_prompt_pct=0.7,
+    #             proprio_dropout_dropout_whole_proprio_pct=0.1,
+    #             episodes_index=list(range(190)),
+    #             boundary_oversampling_factor=2,
+    #             boundary_window_frames=30,
+    #             behavior_dataset_root=None,
+    #         ),
+    #     ),
+    #     pytorch_weight_path="/workspace/RLinf/safetensors_ckpts/openpi_05_20251115_050323_9000_tor",
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #     ).get_freeze_filter(),
+    #     num_train_steps=50_000,
+    #     batch_size=8,
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=1e-4,
+    #         decay_steps=50_000,
+    #         decay_lr=1e-6,
+    #     ),
+    #     ema_decay=None,
+    #     val_log_interval=2500,
+    #     val_repo_id="behavior-1k/2025-challenge-demos",
+    #     val_episodes_index=list(range(190, 200)),
+    #     assets_base_dir="./outputs/assets",
+    #     checkpoint_base_dir="./outputs/checkpoints",
+    #     num_workers=min(32, os.cpu_count() - 2),
+    # ),
+    #
+    # B1K + DreamDojo with wrist cameras (egocentric viewpoint match).
+    # DreamDojo was trained on 44k hours of egocentric human video — wrist cameras
+    # are the closest viewpoint match in the B1K setup.
+    #
+    # DISABLED: same dependency on LeRobotB1KDataConfig as above.
+    #
+    # TrainConfig(
+    #     name="pi05_b1k_dreamdojo_wrist",
+    #     exp_name="openpi",
+    #     project_name="B1K-DreamDojo-Wrist",
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_horizon=128,
+    #         paligemma_variant="gemma_2b_lora_32",
+    #         loss_weighting_strategy="per_group",
+    #         action_groups={
+    #             "base": (0, 3),
+    #             "trunk": (3, 7),
+    #             "left_arm": (7, 14),
+    #             "left_gripper": (14, 15),
+    #             "right_arm": (15, 22),
+    #             "right_gripper": (22, 23),
+    #             "padding": (23, 32),
+    #         },
+    #         group_weights={
+    #             "base": 1.0,
+    #             "trunk": 1.7,
+    #             "left_arm": 2.0,
+    #             "left_gripper": 2.0,
+    #             "right_arm": 2.0,
+    #             "right_gripper": 2.0,
+    #             "padding": 0.0,
+    #         },
+    #         proprio_dropout_dropout_whole_proprio_pct=0.2,
+    #         num_tasks=50,
+    #         task_embedding_scale=1.5,
+    #         use_vega3d=True,
+    #         vega3d_tower_name="dreamdojo",
+    #         vega3d_tower_kwargs={
+    #             "checkpoint_dir": "ckpts/DreamDojo-2B",
+    #             "variant": "teacher",
+    #             "input_resolution": 256,
+    #         },
+    #         vega3d_cameras=("left_wrist_0_rgb", "right_wrist_0_rgb"),
     #         vega3d_force_gate=None,
     #     ),
     #     data=LeRobotB1KDataConfig(

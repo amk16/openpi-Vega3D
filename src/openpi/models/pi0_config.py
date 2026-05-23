@@ -109,6 +109,8 @@ class Pi0Config(_model.BaseModelConfig):
                 object.__setattr__(self, "vega3d_tower_feat_dim", 4)
             elif self.vega3d_tower_name == "wan_t2v":
                 object.__setattr__(self, "vega3d_tower_feat_dim", tower_kwargs.get("feat_dim", 1280))
+            elif self.vega3d_tower_name in ("dreamdojo", "cosmos_base"):
+                object.__setattr__(self, "vega3d_tower_feat_dim", 2048)
             else:
                 raise ValueError(
                     f"Cannot auto-derive vega3d_tower_feat_dim for tower {self.vega3d_tower_name!r}; "
