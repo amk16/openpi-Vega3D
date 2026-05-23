@@ -58,7 +58,7 @@ class Pi0Config(_model.BaseModelConfig):
     # using a non-standard tokenizer.
     fast_vocab_size: int | None = None
     fast_tokenizer_path: str = "physical-intelligence/fast"
-    fast_loss_weight: float = 1.0
+    fast_loss_weight: float = 0.1
 
     # VEGA-3D Adaptive Gated Fusion (Phase 3; paper Eqs. 6-8)
     # When use_vega3d=True, base-camera image tokens are replaced by a gated fusion
