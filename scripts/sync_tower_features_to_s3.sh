@@ -2,10 +2,16 @@
 
 set -euo pipefail
 
-# Defaults can be overridden with args:
-#   ./scripts/sync_tower_features_to_s3.sh [LOCAL_DIR] [S3_URI]
-LOCAL_DIR="${1:-tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20}"
-S3_URI="${2:-s3://behavior-challenge/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20}"
+# Set the local directory to sync (edit here if needed)
+LOCAL_DIR="tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20"
+
+# S3 bucket base (edit here if bucket or main prefix changes)
+S3_BASE="s3://behavior-challenge"
+
+# Derive S3_URI from LOCAL_DIR (sync path preserved after bucket base)
+S3_URI="${S3_BASE}/${LOCAL_DIR}"
+
+# How often to sync (in seconds)
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-70}" # 70 seconds
 
 if ! command -v aws >/dev/null 2>&1; then
