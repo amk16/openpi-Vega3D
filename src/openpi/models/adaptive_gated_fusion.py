@@ -41,7 +41,7 @@ class AdaptiveGatedFusion(nnx.Module):
         self.ln_sem = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.gate_proj = nnx.Linear(2 * hidden_size, 1, rngs=rngs)
 
-    def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         if f_gen.shape != f_sem.shape:
             raise ValueError(f"Shape mismatch: f_gen={f_gen.shape} f_sem={f_sem.shape}")
         if f_gen.shape[-1] != self.hidden_size:
@@ -53,4 +53,4 @@ class AdaptiveGatedFusion(nnx.Module):
             concat = jnp.concatenate([self.ln_gen(f_gen), self.ln_sem(f_sem)], axis=-1)
             g = jax.nn.sigmoid(self.gate_proj(concat))
 
-        return (1.0 - g) * f_gen + g * f_sem
+        return (1.0 - g) * f_gen + g * f_sem, jnp.mean(g)

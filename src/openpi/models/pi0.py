@@ -182,7 +182,7 @@ class Pi0(_model.BaseModel):
 
     def _fuse_camera(
         self, gen_feats: at.Array, semantic_tokens: at.Array
-    ) -> at.Array:
+    ) -> tuple[at.Array, at.Array]:
         """Apply VEGA-3D Adaptive Gated Fusion for one camera stream.
 
         Args:
@@ -190,7 +190,7 @@ class Pi0(_model.BaseModel):
             semantic_tokens: [B, N, D_llm] PaliGemma image tokens for this camera.
 
         Returns:
-            [B, N, D_llm] fused tokens (same shape as semantic_tokens).
+            Tuple of ([B, N, D_llm] fused tokens, scalar gate mean).
         """
         gen_feats = gen_feats.astype(semantic_tokens.dtype)
         f_gen = self.P_gen(gen_feats)
@@ -241,10 +241,11 @@ class Pi0(_model.BaseModel):
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"], at.Float[at.Array, ""] | None]:
         input_mask = []
         ar_mask = []
         tokens = []
+        gate_means = []
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -268,7 +269,8 @@ class Pi0(_model.BaseModel):
                     gen_feats = self._live_tower_features(
                         obs.images[name], image_tokens.shape[1]
                     )
-                image_tokens = self._fuse_camera(gen_feats, image_tokens)
+                image_tokens, gate_mean = self._fuse_camera(gen_feats, image_tokens)
+                gate_means.append(gate_mean)
 
             tokens.append(image_tokens)
             input_mask.append(
@@ -306,7 +308,8 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask
+        avg_gate = jnp.mean(jnp.stack(gate_means)) if gate_means else None
+        return tokens, input_mask, ar_mask, avg_gate
 
     @at.typecheck
     def embed_suffix(
@@ -386,7 +389,7 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, avg_gate = self.embed_prefix(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
 
         if self.use_knowledge_insulation or self.use_fast_auxiliary:
@@ -463,13 +466,17 @@ class Pi0(_model.BaseModel):
             fast_accuracy = None
 
         action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
-        if fast_loss is not None:
-            return {
-                "action_loss": jnp.mean(action_loss),
-                "fast_loss": jnp.mean(fast_loss),
-                "fast_accuracy": fast_accuracy,
-                "total_loss": jnp.mean(action_loss) + self.fast_loss_weight * jnp.mean(fast_loss),
-            }
+        if fast_loss is not None or avg_gate is not None:
+            metrics = {"action_loss": jnp.mean(action_loss)}
+            total = jnp.mean(action_loss)
+            if fast_loss is not None:
+                metrics["fast_loss"] = jnp.mean(fast_loss)
+                metrics["fast_accuracy"] = fast_accuracy
+                total = total + self.fast_loss_weight * jnp.mean(fast_loss)
+            if avg_gate is not None:
+                metrics["gate_mean"] = avg_gate
+            metrics["total_loss"] = total
+            return metrics
         return action_loss
 
     @override
@@ -490,7 +497,7 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, _ = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
