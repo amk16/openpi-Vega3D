@@ -76,10 +76,12 @@ class Pi0Config(_model.BaseModelConfig):
     # E.g. 0.1 -> gate ∈ [0.1, 0.9]. None = no clamping.
     vega3d_gate_clamp: float | None = None
     # Tent warmup: phase 1 cosine-anneals the forced gate from
-    # gate_warmup_start → 0.5 over the first half; phase 2 cosine-anneals from
-    # forced 0.5 → fully learned over the second half. None = no warmup.
+    # gate_warmup_start → gate_warmup_target over the first half; phase 2
+    # cosine-anneals from forced target → fully learned over the second half.
+    # None = no warmup.
     vega3d_gate_warmup_steps: int | None = None
     vega3d_gate_warmup_start: float = 1.0
+    vega3d_gate_warmup_target: float = 0.5
     # Include a learned P_sem(2048→2048) projection on the semantic stream
     # before fusion. False = feed SigLIP tokens directly as f_sem.
     vega3d_use_p_sem: bool = True

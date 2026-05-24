@@ -151,6 +151,7 @@ class Pi0(_model.BaseModel):
                 gate_clamp=config.vega3d_gate_clamp,
                 gate_warmup_steps=config.vega3d_gate_warmup_steps,
                 gate_warmup_start=config.vega3d_gate_warmup_start,
+                gate_warmup_target=config.vega3d_gate_warmup_target,
                 rngs=rngs,
             )
             self._spatial_cameras = tuple(config.vega3d_cameras)
