@@ -140,8 +140,14 @@ class Pi0(_model.BaseModel):
             feat_dim = config.vega3d_tower_feat_dim
             self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
             self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
+            if config.vega3d_identity_init_p_sem:
+                self.P_sem.kernel.value = jnp.eye(hidden, dtype=self.P_sem.kernel.value.dtype)
             self.fusion = _agf.AdaptiveGatedFusion(
-                hidden, force_gate=config.vega3d_force_gate, rngs=rngs
+                hidden,
+                force_gate=config.vega3d_force_gate,
+                gate_clamp=config.vega3d_gate_clamp,
+                gate_warmup_steps=config.vega3d_gate_warmup_steps,
+                rngs=rngs,
             )
             self._spatial_cameras = tuple(config.vega3d_cameras)
             self._tower_feat_dim = feat_dim
@@ -181,13 +187,14 @@ class Pi0(_model.BaseModel):
         self.deterministic = True
 
     def _fuse_camera(
-        self, gen_feats: at.Array, semantic_tokens: at.Array
+        self, gen_feats: at.Array, semantic_tokens: at.Array, *, step: jnp.ndarray | None = None
     ) -> tuple[at.Array, at.Array]:
         """Apply VEGA-3D Adaptive Gated Fusion for one camera stream.
 
         Args:
             gen_feats: [B, N, feat_dim] precomputed spatial-tower features.
             semantic_tokens: [B, N, D_llm] PaliGemma image tokens for this camera.
+            step: current training step (for gate warmup schedule).
 
         Returns:
             Tuple of ([B, N, D_llm] fused tokens, scalar gate mean).
@@ -195,7 +202,7 @@ class Pi0(_model.BaseModel):
         gen_feats = gen_feats.astype(semantic_tokens.dtype)
         f_gen = self.P_gen(gen_feats)
         f_sem = self.P_sem(semantic_tokens)
-        return self.fusion(f_gen, f_sem)
+        return self.fusion(f_gen, f_sem, step=step)
 
     def _run_torch_tower_host(self, raw_image_nhwc):
         """Host-side trampoline for jax.pure_callback.
@@ -240,7 +247,7 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_prefix(
-        self, obs: _model.Observation
+        self, obs: _model.Observation, *, step: jnp.ndarray | None = None
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"], at.Float[at.Array, ""] | None]:
         input_mask = []
         ar_mask = []
@@ -269,7 +276,7 @@ class Pi0(_model.BaseModel):
                     gen_feats = self._live_tower_features(
                         obs.images[name], image_tokens.shape[1]
                     )
-                image_tokens, gate_mean = self._fuse_camera(gen_feats, image_tokens)
+                image_tokens, gate_mean = self._fuse_camera(gen_feats, image_tokens, step=step)
                 gate_means.append(gate_mean)
 
             tokens.append(image_tokens)
@@ -367,7 +374,7 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False, step: jnp.ndarray | None = None
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         # Skip spatial augmentation (RandomCrop / Resize / Rotate) on cameras
@@ -389,7 +396,7 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_tokens, prefix_mask, prefix_ar_mask, avg_gate = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, avg_gate = self.embed_prefix(observation, step=step)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
 
         if self.use_knowledge_insulation or self.use_fast_auxiliary:

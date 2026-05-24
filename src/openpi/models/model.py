@@ -312,6 +312,7 @@ class BaseModel(nnx.Module, abc.ABC):
         actions: Actions,
         *,
         train: bool = False,
+        step: jnp.ndarray | None = None,
     ) -> at.Float[at.Array, "*b ah"]: ...
 
     @abc.abstractmethod

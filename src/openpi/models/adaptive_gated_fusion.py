@@ -31,17 +31,23 @@ class AdaptiveGatedFusion(nnx.Module):
         hidden_size: int,
         *,
         force_gate: float | None,
+        gate_clamp: float | None = None,
+        gate_warmup_steps: int | None = None,
         rngs: nnx.Rngs,
     ):
         if force_gate is not None and not 0.0 <= force_gate <= 1.0:
             raise ValueError(f"force_gate must be in [0, 1], got {force_gate}")
+        if gate_clamp is not None and not 0.0 < gate_clamp < 0.5:
+            raise ValueError(f"gate_clamp must be in (0, 0.5), got {gate_clamp}")
         self.hidden_size = hidden_size
         self.force_gate = force_gate
+        self.gate_clamp = gate_clamp
+        self.gate_warmup_steps = gate_warmup_steps
         self.ln_gen = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.ln_sem = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.gate_proj = nnx.Linear(2 * hidden_size, 1, rngs=rngs)
 
-    def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, f_gen: jnp.ndarray, f_sem: jnp.ndarray, *, step: jnp.ndarray | None = None) -> tuple[jnp.ndarray, jnp.ndarray]:
         if f_gen.shape != f_sem.shape:
             raise ValueError(f"Shape mismatch: f_gen={f_gen.shape} f_sem={f_sem.shape}")
         if f_gen.shape[-1] != self.hidden_size:
@@ -52,5 +58,12 @@ class AdaptiveGatedFusion(nnx.Module):
         else:
             concat = jnp.concatenate([self.ln_gen(f_gen), self.ln_sem(f_sem)], axis=-1)
             g = jax.nn.sigmoid(self.gate_proj(concat))
+            if self.gate_clamp is not None:
+                lo = self.gate_clamp
+                g = lo + (1.0 - 2.0 * lo) * g
+            if self.gate_warmup_steps is not None and step is not None:
+                t = jnp.minimum(step / self.gate_warmup_steps, 1.0)
+                lerp = 0.5 * (1.0 + jnp.cos(jnp.pi * t))
+                g = lerp * 0.5 + (1.0 - lerp) * g
 
         return (1.0 - g) * f_gen + g * f_sem, jnp.mean(g)

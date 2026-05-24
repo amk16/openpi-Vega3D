@@ -149,7 +149,7 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        result = model.compute_loss(rng, observation, actions, train=True)
+        result = model.compute_loss(rng, observation, actions, train=True, step=state.step)
         if isinstance(result, dict):
             return result["total_loss"], result
         return jnp.mean(result), {}
@@ -207,7 +207,7 @@ def val_step(
     model = nnx.merge(state.model_def, state.params)
     model.eval()
     observation, actions = batch
-    result = model.compute_loss(rng, observation, actions, train=False)
+    result = model.compute_loss(rng, observation, actions, train=False, step=state.step)
     if isinstance(result, dict):
         return {f"val_{k}": v for k, v in result.items()}
     return {"val_loss": jnp.mean(result)}

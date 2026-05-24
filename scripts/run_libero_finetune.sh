@@ -48,3 +48,9 @@ echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 #     --exp-name=wan_precomp_semonly_v1_w1s1_blk20_NO_INIT_BIAS \
 #     --overwrite
 # echo "[run_libero_finetune] $(date) WAN-control run exited with code $?"
+
+echo "[run_libero_finetune] $(date) starting WAN gate warmup run (pi05_libero_deeplora_ki_ar)"
+HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
+    pi05_libero_deeplora_ki_ar_wan_precomp_gatewarmup \
+    --exp-name=libero_deeplora_ki_ar_wan_precomp_gatewarmup \
+    --overwrite
