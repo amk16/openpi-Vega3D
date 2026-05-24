@@ -378,11 +378,7 @@ class LoadPrecomputedTowerFeatures(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         if "episode_index" not in data or "frame_index" not in data:
-            raise ValueError(
-                "LoadPrecomputedTowerFeatures requires episode_index and "
-                "frame_index in the data dict; ensure the repack transform "
-                "passes them through."
-            )
+            return data
 
         import safetensors
         import torch

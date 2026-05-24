@@ -54,6 +54,10 @@ class Args:
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
+    # If true, force the spatial tower to be constructed and run live at inference time, even if the config
+    # was set up for precomputed features. Allows serving any precomp training config for live inference.
+    load_live_tower: bool = False
+
 
 # Default checkpoints that should be used for each environment.
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
@@ -76,11 +80,22 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
 }
 
 
-def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) -> _policy.Policy:
+def _maybe_enable_live_tower(train_config: _config.TrainConfig, load_live_tower: bool) -> _config.TrainConfig:
+    """Override vega3d_build_tower=True on the config if the flag is set."""
+    if load_live_tower and hasattr(train_config.model, "use_vega3d") and train_config.model.use_vega3d:
+        model = dataclasses.replace(train_config.model, vega3d_build_tower=True)
+        train_config = dataclasses.replace(train_config, model=model)
+    return train_config
+
+
+def create_default_policy(
+    env: EnvMode, *, default_prompt: str | None = None, load_live_tower: bool = False
+) -> _policy.Policy:
     """Create a default policy for the given environment."""
     if checkpoint := DEFAULT_CHECKPOINT.get(env):
+        config = _maybe_enable_live_tower(_config.get_config(checkpoint.config), load_live_tower)
         return _policy_config.create_trained_policy(
-            _config.get_config(checkpoint.config), checkpoint.dir, default_prompt=default_prompt
+            config, checkpoint.dir, default_prompt=default_prompt
         )
     raise ValueError(f"Unsupported environment mode: {env}")
 
@@ -89,11 +104,14 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            config = _maybe_enable_live_tower(_config.get_config(args.policy.config), args.load_live_tower)
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                config, args.policy.dir, default_prompt=args.default_prompt
             )
         case Default():
-            return create_default_policy(args.env, default_prompt=args.default_prompt)
+            return create_default_policy(
+                args.env, default_prompt=args.default_prompt, load_live_tower=args.load_live_tower
+            )
 
 
 def main(args: Args) -> None:

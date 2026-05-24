@@ -1050,8 +1050,7 @@ _CONFIGS = [
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
-            vega3d_live_tower_for_inference=False,
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1061,12 +1060,6 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
-            # covers ~33 frames of motion at 20Hz). The cache stores the *last
-            # latent slot* per training frame so the schema matches single-frame.
-            # Path includes the variant tag so different (window, stride, block)
-            # caches don't collide.
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             tower_window=1,
@@ -1082,8 +1075,6 @@ _CONFIGS = [
             decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        # Same held-out validation split and S3 checkpoint streaming as the
-        # WAN variant, so the baseline and WAN runs are directly comparable.
         val_episodes_index=list(range(0, 1693, 20)),
         s3_checkpoint_bucket="behavior-challenge",
         freeze_filter=pi0_config.Pi0Config(
@@ -1110,8 +1101,7 @@ _CONFIGS = [
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
-            vega3d_live_tower_for_inference=False,
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
             vega3d_gate_warmup_steps=6000,
             vega3d_use_p_sem=False,
         ),
@@ -1148,67 +1138,7 @@ _CONFIGS = [
         num_workers=32,
     ),
     TrainConfig(
-        name="pi05_libero_deeplora_ki_ar_wan_live",
-        model=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
-            use_knowledge_insulation=True,
-            use_fast_auxiliary=True,
-            use_vega3d=True,
-            vega3d_tower_name="wan_t2v",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
-                "output_spatial": 16,
-                "feat_block_idx": 20,
-                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
-            },
-            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=1536,
-            vega3d_live_tower_for_inference=True,
-            vega3d_skip_tower_construction=False,
-        ),
-        data=LeRobotLiberoVegaDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
-                asset_id=None,
-            ),
-            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
-            # covers ~33 frames of motion at 20Hz). The cache stores the *last
-            # latent slot* per training frame so the schema matches single-frame.
-            # Path includes the variant tag so different (window, stride, block)
-            # caches don't collide.
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
-            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            tower_window=1,
-            tower_stride=1,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=18_000,
-        batch_size=32,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=1e-5,
-            decay_steps=18_000,
-            decay_lr=1e-6,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        # Same held-out validation split and S3 checkpoint streaming as the
-        # WAN variant, so the baseline and WAN runs are directly comparable.
-        val_episodes_index=list(range(0, 1693, 20)),
-        s3_checkpoint_bucket="behavior-challenge",
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=0.999,
-        num_workers=32,
-    ),
-    TrainConfig(
-        name="pi05_libero_lora_wan_last_blk",
+        name="pi05_libero_lora_wan_precomp_last_blk",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=10,
@@ -1216,8 +1146,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             use_vega3d=True,
-            vega3d_live_tower_for_inference=True,
-            vega3d_skip_tower_construction=False,
+            vega3d_build_tower=False,
             vega3d_tower_name="wan_t2v",
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
@@ -1228,7 +1157,7 @@ _CONFIGS = [
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
         ),
-        data=LeRobotLiberoDataConfig(
+        data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
@@ -1236,11 +1165,14 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk_last",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=1,
+            tower_stride=1,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
-        # WAN tower in-process: dropped from 64 to 8 to fit on a single 48GB GPU.
-        batch_size=8,
+        batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=1e-5,
@@ -1248,56 +1180,13 @@ _CONFIGS = [
             decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_libero_lora_wan_blk20",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=10,
-            discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            use_vega3d=True,
-            vega3d_live_tower_for_inference=True,
-            vega3d_skip_tower_construction=False,
-            vega3d_tower_name="wan_t2v",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
-                "output_spatial": 16,
-                "feat_block_idx": 20,
-                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
-            },
-            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=1536,
-        ),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
-                asset_id=None,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        # WAN tower in-process: dropped from 64 to 8 to fit on a single 48GB GPU.
-        batch_size=8,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=1e-5,
-            decay_steps=30_000,
-            decay_lr=1e-6,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
+        num_workers=16,
     ),
     TrainConfig(
         name="pi05_libero_lora_wan_precomp",
@@ -1312,19 +1201,12 @@ _CONFIGS = [
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
                 "output_spatial": 16,
-                # Paper Implementation Details: "extract features at k=300 from
-                # the 20th DiT layer." Matches VEGA-3D/scripts/3d/train/
-                # train_wan_t2v_online.sh:119 (--generative_vision_tower_feat_block_idx 20).
-                # The encoder default of -1 (last layer) is the layer the paper's
-                # own ablation (Fig 7b) identifies as worst -- pixel-level
-                # rendering with weak abstraction.
                 "feat_block_idx": 20,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
-            # Tower stays out of RAM during training; precomputed features
-            # supply the generative stream. Eval configs must NOT set this.
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1334,12 +1216,6 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
-            # covers ~33 frames of motion at 20Hz). The cache stores the *last
-            # latent slot* per training frame so the schema matches single-frame.
-            # Path includes the variant tag so different (window, stride, block)
-            # caches don't collide.
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             tower_window=1,
@@ -1395,10 +1271,7 @@ _CONFIGS = [
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
-            # Tower stays out of RAM during training; precomputed features
-            # supply the generative stream. Eval configs must NOT set this.
-            vega3d_skip_tower_construction=True,
-            vega3d_live_tower_for_inference=False,
+            vega3d_build_tower=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1408,12 +1281,6 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
-            # covers ~33 frames of motion at 20Hz). The cache stores the *last
-            # latent slot* per training frame so the schema matches single-frame.
-            # Path includes the variant tag so different (window, stride, block)
-            # caches don't collide.
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             tower_window=1,
@@ -1431,78 +1298,9 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         val_episodes_index=list(range(0, 1693, 20)),
-        # Stream checkpoints to S3; keep only the newest on local disk.
         s3_checkpoint_bucket="behavior-challenge",
         num_workers=16,
     ),
-    TrainConfig(
-        name="pi05_libero_wan_live",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=10,
-            discrete_state_input=False,
-            use_vega3d=True,
-            vega3d_tower_name="wan_t2v",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
-                "output_spatial": 16,
-                # Paper Implementation Details: "extract features at k=300 from
-                # the 20th DiT layer." Matches VEGA-3D/scripts/3d/train/
-                # train_wan_t2v_online.sh:119 (--generative_vision_tower_feat_block_idx 20).
-                # The encoder default of -1 (last layer) is the layer the paper's
-                # own ablation (Fig 7b) identifies as worst -- pixel-level
-                # rendering with weak abstraction.
-                "feat_block_idx": 20,
-                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
-            },
-            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=1536,
-            # Put Tower in RAM for inference
-            vega3d_skip_tower_construction=False,
-            vega3d_live_tower_for_inference=True,
-        ),
-        data=LeRobotLiberoVegaDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
-                asset_id=None,
-            ),
-            # NOTE IS OUTDATED: Multi-frame causal window: each training frame's WAN feature is
-            # computed from a [f-32, f-30, ..., f-2, f] clip (9 frames, stride 2,
-            # covers ~33 frames of motion at 20Hz). The cache stores the *last
-            # latent slot* per training frame so the schema matches single-frame.
-            # Path includes the variant tag so different (window, stride, block)
-            # caches don't collide.
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20",
-            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            tower_window=1,
-            tower_stride=1,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        batch_size=256,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        val_episodes_index=list(range(0, 1693, 20)),
-        # Stream checkpoints to S3; keep only the newest on local disk.
-        s3_checkpoint_bucket="behavior-challenge",
-        num_workers=16,
-    ),
-    # Control for the WAN ablation. Identical to pi05_libero_lora_wan_precomp --
-    # same P_gen / P_sem / fusion architecture, same precomputed-feature data
-    # pipeline, same hyperparameters and val split -- except vega3d_force_gate
-    # pins the fusion gate to 1.0, so the generative (WAN) stream is gated out
-    # entirely. vs pi05_libero_lora_wan_precomp this isolates the WAN
-    # contribution with architecture held fixed; vs pi05_libero_lora it isolates
-    # the cost/benefit of the extra P_sem projection.
     TrainConfig(
         name="pi05_libero_lora_wan_precomp_semonly",
         model=pi0_config.Pi0Config(
@@ -1516,13 +1314,12 @@ _CONFIGS = [
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
                 "output_spatial": 16,
-                # Same block as the WAN run -- ablation isolates the gate, not
-                # the extraction layer.
                 "feat_block_idx": 20,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=1536,
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
             # Pin the fusion gate to pure-semantic: fused = f_sem. The WAN
             # stream contributes nothing and P_gen receives no gradient.
             vega3d_force_gate=1.0,
@@ -1562,7 +1359,7 @@ _CONFIGS = [
         num_workers=16,
     ),
     TrainConfig(
-        name="pi05_libero_lora_wan_live_semonly_last_blk",
+        name="pi05_libero_lora_wan_precomp_semonly_last_blk",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=10,
@@ -1570,8 +1367,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             use_vega3d=True,
-            vega3d_live_tower_for_inference=True,
-            vega3d_skip_tower_construction=False,
+            vega3d_build_tower=False,
             vega3d_tower_name="wan_t2v",
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
@@ -1621,54 +1417,9 @@ _CONFIGS = [
     ),
     #
     # DreamDojo (Cosmos-Predict2.5-2B) LIBERO configs.
-    # Mirrors the WAN LIBERO configs above for apples-to-apples comparison.
     # DreamDojo's 44k hours of egocentric human video may yield stronger
     # geometric priors for manipulation tasks than WAN's text-to-video model.
     #
-    TrainConfig(
-        name="pi05_libero_lora_dreamdojo",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=10,
-            discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            use_vega3d=True,
-            vega3d_tower_name="dreamdojo",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/DreamDojo-2B",
-                "output_spatial": 16,
-                "input_resolution": 256,
-                "feat_block_idx": 20,
-            },
-            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=2048,
-        ),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
-                asset_id=None,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        # DreamDojo 2B is ~50% larger than WAN 1.3B; batch=4 to fit on 48GB GPU.
-        batch_size=4,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=1e-5,
-            decay_steps=30_000,
-            decay_lr=1e-6,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
     TrainConfig(
         name="pi05_libero_lora_dreamdojo_precomp",
         model=pi0_config.Pi0Config(
@@ -1687,7 +1438,7 @@ _CONFIGS = [
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=2048,
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1697,10 +1448,6 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            # Multi-frame causal window matching WAN config (window=17,
-            # stride=2). Each training frame's DreamDojo feature is computed
-            # from a [f-32, f-30, ..., f-2, f] clip — Cosmos DiT temporal
-            # attention runs across the window, last latent slot kept.
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/dreamdojo_16x2048_w17s2_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             tower_window=17,
@@ -1731,49 +1478,6 @@ _CONFIGS = [
     # effects in WAN/DreamDojo/Cosmos comparisons.
     #
     TrainConfig(
-        name="pi05_libero_lora_cosmos_base",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=10,
-            discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            use_vega3d=True,
-            vega3d_tower_name="cosmos_base",
-            vega3d_tower_kwargs={
-                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
-                "output_spatial": 16,
-                "input_resolution": 256,
-                "feat_block_idx": 20,
-            },
-            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=2048,
-        ),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
-                asset_id=None,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        batch_size=4,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=1e-5,
-            decay_steps=30_000,
-            decay_lr=1e-6,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
-    TrainConfig(
         name="pi05_libero_lora_cosmos_base_precomp",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1791,7 +1495,7 @@ _CONFIGS = [
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             vega3d_tower_feat_dim=2048,
-            vega3d_skip_tower_construction=True,
+            vega3d_build_tower=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",

@@ -91,18 +91,11 @@ class Pi0Config(_model.BaseModelConfig):
     # init time. Auto-derived from `vega3d_tower_name` in __post_init__ when
     # left as None.
     vega3d_tower_feat_dim: int | None = None
-    # When True, do NOT instantiate the PyTorch spatial_tower at model
-    # construction time. Saves ~3GB RAM during precomputed-feature training
-    # runs where observation.tower_features always supplies the features and
-    # the live tower forward path is never taken. Must stay False for any
-    # eval/inference run that needs to compute features live from images.
-    vega3d_skip_tower_construction: bool = False
-    # JAX-only: build a PyTorch spatial_tower inside `Pi0` and use it at
-    # inference time when observation.tower_features is missing. The torch
-    # tower runs on the host via jax.pure_callback (no autograd through the
-    # boundary) so the JAX sample_actions stays jitted. Eval-only knob --
-    # training paths always consume precomputed features from the dataloader.
-    vega3d_live_tower_for_inference: bool = False
+    # When True, instantiate the PyTorch spatial tower at model construction
+    # time for live feature extraction (training in PyTorch, or inference in
+    # JAX via jax.pure_callback). When False, skip tower construction and
+    # rely on precomputed features from the dataloader — saves ~3GB RAM.
+    vega3d_build_tower: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:
