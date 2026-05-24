@@ -75,9 +75,14 @@ class Pi0Config(_model.BaseModelConfig):
     # Clamp the learned gate to [lo, 1-lo] so neither branch can die.
     # E.g. 0.1 -> gate ∈ [0.1, 0.9]. None = no clamping.
     vega3d_gate_clamp: float | None = None
-    # Cosine-anneal the gate from forced 0.5 (equal mix) to fully learned over
-    # this many steps. None = no warmup (gate is learned from step 0).
+    # Tent warmup: phase 1 cosine-anneals the forced gate from
+    # gate_warmup_start → 0.5 over the first half; phase 2 cosine-anneals from
+    # forced 0.5 → fully learned over the second half. None = no warmup.
     vega3d_gate_warmup_steps: int | None = None
+    vega3d_gate_warmup_start: float = 1.0
+    # Include a learned P_sem(2048→2048) projection on the semantic stream
+    # before fusion. False = feed SigLIP tokens directly as f_sem.
+    vega3d_use_p_sem: bool = True
     # Identity-init P_sem so the semantic stream starts as a no-op.
     vega3d_identity_init_p_sem: bool = False
     # Static feat_dim of the precomputed spatial-tower features. The JAX Pi0

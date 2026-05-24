@@ -139,14 +139,18 @@ class Pi0(_model.BaseModel):
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             feat_dim = config.vega3d_tower_feat_dim
             self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
-            self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
-            if config.vega3d_identity_init_p_sem:
-                self.P_sem.kernel.value = jnp.eye(hidden, dtype=self.P_sem.kernel.value.dtype)
+            if config.vega3d_use_p_sem:
+                self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
+                if config.vega3d_identity_init_p_sem:
+                    self.P_sem.kernel.value = jnp.eye(hidden, dtype=self.P_sem.kernel.value.dtype)
+            else:
+                self.P_sem = None
             self.fusion = _agf.AdaptiveGatedFusion(
                 hidden,
                 force_gate=config.vega3d_force_gate,
                 gate_clamp=config.vega3d_gate_clamp,
                 gate_warmup_steps=config.vega3d_gate_warmup_steps,
+                gate_warmup_start=config.vega3d_gate_warmup_start,
                 rngs=rngs,
             )
             self._spatial_cameras = tuple(config.vega3d_cameras)
@@ -201,7 +205,7 @@ class Pi0(_model.BaseModel):
         """
         gen_feats = gen_feats.astype(semantic_tokens.dtype)
         f_gen = self.P_gen(gen_feats)
-        f_sem = self.P_sem(semantic_tokens)
+        f_sem = self.P_sem(semantic_tokens) if self.P_sem is not None else semantic_tokens
         return self.fusion(f_gen, f_sem, step=step)
 
     def _run_torch_tower_host(self, raw_image_nhwc):
