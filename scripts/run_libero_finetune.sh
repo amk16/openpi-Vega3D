@@ -27,7 +27,7 @@ source /venv/main/bin/activate
 
 # ---- Run 1: plain pi05 LoRA baseline (no VEGA) ----
 echo "[run_libero_finetune] $(date) starting WAN FFT run"
-HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
+OPENBLAS_NUM_THREADS=1 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_fft_wan_precomp_gatewarmup \
     --exp-name=fft_wan_precomp_gatewarmup \
     --overwrite
@@ -35,7 +35,7 @@ echo "[run_libero_finetune] $(date) WAN run exited with code $?"
 
 # ---- Run 2: WAN-tower variant (precomputed features) ----
 echo "[run_libero_finetune] $(date) starting WAN baseline run"
-HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
+OPENBLAS_NUM_THREADS=1 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
     pi05_libero_fft \
     --exp-name=libero_fft \
     --overwrite
