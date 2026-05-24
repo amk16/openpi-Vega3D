@@ -30,9 +30,12 @@ RUN_SCRIPT="$SCRIPT_DIR/run_libero_eval.sh"
 # "lora_baseline|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/8000"
 # "wan_precomp_w1s1_blk20_no_init_bias|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS/29999"
 # "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly_v1/8000"
+
+# 1. 1x H100 run BS=128? no KI or AR but it is a full finetune. Again, early stop, maybe?
+# 2. 2x H100 run BS=256 with KI + AR, early stop on val loss minimum
 RUNS=(
-    "wan_precomp_original_30k_steps|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/29999"
-    "lora_baseline_30k_steps|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/29999"
+    "baseline_full_finetune_bs_128|pi05_libero_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_wan_precomp/libero_wan_full_finetune/6000"
+    "baseline_ki_ar_bs_256_NO_WAN_DESPITE_CONFIG_NAME|pi05_libero_deeplora_ki_ar_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_ki_ar_wan_precomp/libero_deeplora_ki_ar_wan_precomp/3000"
 )
 
 SUITES=(
