@@ -11,6 +11,7 @@ DreamDojo is fine-tuned on 44k hours of egocentric video, base Cosmos is
 NVIDIA's pretrained checkpoint. Use different checkpoint_dir to switch.
 """
 
+import json
 import logging
 import os
 
@@ -442,15 +443,36 @@ def _resolve_vae_dir(checkpoint_dir: str, vae_dir: str | None) -> str | None:
 
 
 def _load_vae(vae_dir: str, dtype: str):
-    """Load the Cosmos VAE from a diffusers-format directory."""
-    from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos  # noqa: PLC0415
+    """Load the VAE from a diffusers-format directory.
 
+    Dispatches on the config's `_class_name`: Cosmos-Predict2.5-2B ships a
+    WAN VAE (AutoencoderKLWan) in its diffusers branch despite the model
+    being a Cosmos transformer. Earlier Cosmos releases used
+    AutoencoderKLCosmos. Both expose the same `encode(x).latent_dist.sample()`
+    interface and produce 16-channel latents at 8x spatial compression.
+    """
     pt_dtype = _DTYPE_MAP[dtype]
-    logger.info("Loading Cosmos VAE from %s ...", vae_dir)
-    vae = AutoencoderKLCosmos.from_pretrained(vae_dir, torch_dtype=pt_dtype)
+    config_path = os.path.join(vae_dir, "config.json")
+    vae_class_name = None
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path) as f:
+                vae_class_name = json.load(f).get("_class_name")
+        except Exception as e:
+            logger.warning("Could not read %s: %s", config_path, e)
+
+    if vae_class_name == "AutoencoderKLWan":
+        from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan  # noqa: PLC0415
+        VaeCls = AutoencoderKLWan
+    else:
+        from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos  # noqa: PLC0415
+        VaeCls = AutoencoderKLCosmos
+
+    logger.info("Loading %s from %s ...", VaeCls.__name__, vae_dir)
+    vae = VaeCls.from_pretrained(vae_dir, torch_dtype=pt_dtype)
     vae.eval().requires_grad_(False)  # noqa: FBT003
     param_count = sum(p.numel() for p in vae.parameters())
-    logger.info("Cosmos VAE loaded (%d params, %.1fM)", param_count, param_count / 1e6)
+    logger.info("%s loaded (%d params, %.1fM)", VaeCls.__name__, param_count, param_count / 1e6)
     return vae
 
 

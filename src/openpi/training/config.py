@@ -1764,6 +1764,66 @@ _CONFIGS = [
         ema_decay=None,
         num_workers=16,
     ),
+    # Cosmos base tower + deep LoRA (rank 32) + EMA. No KI / no FAST aux.
+    # 30k steps, batch 32, single-frame precompute (w=1, s=1). Cache must
+    # be populated by scripts/precompute_tower_features.py with
+    # --prompt_cache before launch. Naming follows the upstream
+    # `pi05_libero_deeplora_*_precomp` convention: `deeplora` denotes
+    # rank-32 LoRA on both attn + ffn; `w1s1` denotes the tower feature
+    # window/stride. No gate warmup, no P_sem disable -- the bare-bones
+    # deeplora form, opt into extras via separate TrainConfigs.
+    TrainConfig(
+        name="pi05_libero_deeplora_cosmos_base_precomp_w1s1",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+            use_knowledge_insulation=False,
+            use_fast_auxiliary=False,
+            use_vega3d=True,
+            vega3d_tower_name="cosmos_base",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
+                "output_spatial": 16,
+                "input_resolution": 256,
+                "feat_block_idx": 20,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=2048,
+            vega3d_live_tower_for_inference=False,
+            vega3d_skip_tower_construction=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w1s1_blk20",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=1,
+            tower_stride=1,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=0.999,
+        num_workers=32,
+    ),
     #
     # Fine-tuning Aloha configs.
     #
