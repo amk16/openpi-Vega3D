@@ -1094,12 +1094,12 @@ _CONFIGS = [
         num_workers=32,
     ),
     TrainConfig(
-        name="pi05_libero_deeplora_ki_ar_wan_precomp_gatewarmup",
+        name="pi05_libero_deeplora_wan_precomp_gatewarmup",
         model=pi0_config.Pi0Config(
             pi05=True, action_horizon=10, discrete_state_input=False,
             paligemma_variant="gemma_2b_lora_32", action_expert_variant="gemma_300m_lora",
-            use_knowledge_insulation=True,
-            use_fast_auxiliary=True,
+            use_knowledge_insulation=False,
+            use_fast_auxiliary=False,
             use_vega3d=True,
             vega3d_tower_name="wan_t2v",
             vega3d_tower_kwargs={
