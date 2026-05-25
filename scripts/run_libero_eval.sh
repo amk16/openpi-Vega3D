@@ -136,6 +136,7 @@ echo "[run_libero_eval] server log     = $SERVER_LOG"
     export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/packages/openpi-client/src:${PYTHONPATH:-}"
     XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 exec python "$SCRIPT_DIR/scripts/serve_policy.py" \
         --port "$PORT" \
+        --load-live-tower \
         policy:checkpoint \
         --policy.config "$CONFIG" \
         --policy.dir "$CHECKPOINT"

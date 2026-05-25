@@ -34,6 +34,7 @@ class AdaptiveGatedFusion(nnx.Module):
         gate_clamp: float | None = None,
         gate_warmup_steps: int | None = None,
         gate_warmup_start: float = 1.0,
+        gate_warmup_target: float = 0.5,
         rngs: nnx.Rngs,
     ):
         if force_gate is not None and not 0.0 <= force_gate <= 1.0:
@@ -45,6 +46,7 @@ class AdaptiveGatedFusion(nnx.Module):
         self.gate_clamp = gate_clamp
         self.gate_warmup_steps = gate_warmup_steps
         self.gate_warmup_start = gate_warmup_start
+        self.gate_warmup_target = gate_warmup_target
         self.ln_gen = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.ln_sem = nnx.LayerNorm(hidden_size, rngs=rngs)
         self.gate_proj = nnx.Linear(2 * hidden_size, 1, rngs=rngs)
@@ -73,13 +75,13 @@ class AdaptiveGatedFusion(nnx.Module):
                 peak_step = warmup / 2.0
                 # Phase 1 (0 -> peak): cosine-anneal forced value from start -> 0.5
                 t1 = jnp.clip(step / peak_step, 0.0, 1.0)
-                forced = self.gate_warmup_start + (0.5 - self.gate_warmup_start) * 0.5 * (1.0 - jnp.cos(jnp.pi * t1))
-                # Phase 2 (peak -> end): cosine-anneal from forced 0.5 -> learned
+                forced = self.gate_warmup_start + (self.gate_warmup_target - self.gate_warmup_start) * 0.5 * (1.0 - jnp.cos(jnp.pi * t1))
+                # Phase 2 (peak → end): cosine-anneal from forced 0.5 → learned
                 t2 = jnp.clip((step - peak_step) / (warmup - peak_step), 0.0, 1.0)
                 lerp = 0.5 * (1.0 + jnp.cos(jnp.pi * t2))
                 in_phase1 = step < peak_step
                 effective_lerp = jnp.where(in_phase1, 1.0, lerp)
-                effective_forced = jnp.where(in_phase1, forced, 0.5)
+                effective_forced = jnp.where(in_phase1, forced, self.gate_warmup_target)
                 g = effective_lerp * effective_forced + (1.0 - effective_lerp) * g
                 g_f32 = effective_lerp * effective_forced + (1.0 - effective_lerp) * g_f32
             g_mean = jnp.mean(g_f32)

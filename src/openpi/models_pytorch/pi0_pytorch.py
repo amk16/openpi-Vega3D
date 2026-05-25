@@ -120,14 +120,14 @@ class PI0Pytorch(nn.Module):
             from openpi.models_pytorch.adaptive_gated_fusion import AdaptiveGatedFusion
 
             tower_kwargs = dict(config.vega3d_tower_kwargs or {})
-            skip_tower = getattr(config, "vega3d_skip_tower_construction", False)
+            skip_tower = not getattr(config, "vega3d_build_tower", False)
             if skip_tower:
                 # Precomputed-features training path: avoid loading WAN weights
                 # into RAM. P_gen needs the feat_dim, which must be specified
                 # statically on the config in this mode.
                 if config.vega3d_tower_feat_dim is None:
                     raise ValueError(
-                        "vega3d_skip_tower_construction=True requires "
+                        "vega3d_build_tower=False requires "
                         "vega3d_tower_feat_dim to be set explicitly on the config."
                     )
                 self.spatial_tower = None
@@ -265,7 +265,7 @@ class PI0Pytorch(nn.Module):
             if self.spatial_tower is None:
                 raise RuntimeError(
                     "VEGA-3D fusion requested but spatial_tower was not "
-                    "constructed (vega3d_skip_tower_construction=True) and no "
+                    "constructed (vega3d_build_tower=False) and no "
                     "precomputed tower_features were supplied for this camera."
                 )
             gen_feats = self.spatial_tower.encode(raw_image)

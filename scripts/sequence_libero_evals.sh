@@ -25,17 +25,19 @@ RUN_SCRIPT="$SCRIPT_DIR/run_libero_eval.sh"
 #   checkpoint_dir — s3://, gs://, or local path. s3:// paths are synced into the
 #                    local checkpoint cache by run_libero_eval.sh before serving.
 
-# "wan_precomp_original|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/8000"
-# "wan_precomp_w1s1|pi05_libero_lora_wan_blk20|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20/8000"
+# NOTE: These configs now use precomp names + --load-live-tower flag for inference.
+# "wan_precomp_original|pi05_libero_lora_wan_precomp_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1/8000"
+# "wan_precomp_w1s1|pi05_libero_lora_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20/8000"
 # "lora_baseline|pi05_libero_lora|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora/lora_baseline_v1/8000"
-# "wan_precomp_w1s1_blk20_no_init_bias|pi05_libero_lora_wan_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS/29999"
+# "wan_precomp_w1s1_blk20_no_init_bias|pi05_libero_lora_wan_precomp_last_blk|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp/wan_precomp_v1_w1s1_blk20_NO_INIT_BIAS/29999"
 # "semonly|pi05_libero_lora_wan_precomp_semonly|s3://behavior-challenge/openpi_checkpoints/pi05_libero_lora_wan_precomp_semonly/wan_precomp_semonly_v1/8000"
+# "baseline_full_finetune_bs_128|pi05_libero_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_wan_precomp/libero_wan_full_finetune/6000"
+# "golden_boy_baseline_bs32_deeplora_ki_ar|pi05_libero_deeplora_ki_ar|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_ki_ar/libero_deeplora_ki_ar_2nd/17999"
+# "baseline_ki_ar_bs_256_NO_WAN_DESPITE_CONFIG_NAME|pi05_libero_deeplora_ki_ar|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_ki_ar_wan_precomp/libero_deeplora_ki_ar_wan_precomp/3000"
+# "golden_boy_bs32_deeplora_ki_ar_WITH_WAN|pi05_libero_deeplora_ki_ar_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_ki_ar_wan_precomp/libero_deeplora_ki_ar_wan_precomp_fr/17999"
 
-# 1. 1x H100 run BS=128? no KI or AR but it is a full finetune. Again, early stop, maybe?
-# 2. 2x H100 run BS=256 with KI + AR, early stop on val loss minimum
 RUNS=(
-    "baseline_full_finetune_bs_128|pi05_libero_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_wan_precomp/libero_wan_full_finetune/6000"
-    "baseline_ki_ar_bs_256_NO_WAN_DESPITE_CONFIG_NAME|pi05_libero_deeplora_ki_ar_wan_precomp|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_ki_ar_wan_precomp/libero_deeplora_ki_ar_wan_precomp/3000"
+    "gatewarmup_step9000|pi05_libero_deeplora_wan_precomp_gatewarmup|s3://behavior-challenge/openpi_checkpoints/pi05_libero_deeplora_wan_precomp_gatewarmup/libero_deeplora_wan_precomp_gatewarmup/9000"
 )
 
 SUITES=(
