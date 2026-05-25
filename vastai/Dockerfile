@@ -57,6 +57,11 @@ RUN /venv/libero/bin/python -m ensurepip --upgrade
 # Clone LIBERO-Pro
 RUN git clone https://github.com/Zxy-MLlab/LIBERO-PRO.git /opt/libero-pro
 
+# Overlay bddl_files and init_files from S3 (staged on the host by `make sync-libero-data`,
+# since the Dockerfile has no AWS auth). Source: s3://behavior-challenge/libero_{bddl,init}_files/
+COPY vastai/libero-data/bddl_files/ /opt/libero-pro/libero/libero/bddl_files/
+COPY vastai/libero-data/init_files/ /opt/libero-pro/libero/libero/init_files/
+
 # Install LIBERO-Pro deps + package
 COPY examples/libero/requirements.txt /tmp/requirements-libero.txt
 RUN /venv/libero/bin/pip3 install --no-cache-dir -r /tmp/requirements-libero.txt --extra-index-url https://download.pytorch.org/whl/cu113
