@@ -1629,7 +1629,7 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
                 asset_id=None,
             ),
-            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w17s2_blk20",
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
             tower_window=17,
             tower_stride=2,

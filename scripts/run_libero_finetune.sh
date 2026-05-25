@@ -27,7 +27,7 @@ source /venv/main/bin/activate
 
 echo "[run_libero_finetune] $(date) starting Cosmos FFT run"
 OPENBLAS_NUM_THREADS=1 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-    pi05_libero_lora_cosmos_base_precomp \
+    pi05_libero_fft_cosmos_precomp_gatewarmup \
     --exp-name=fft_cosmos_precomp_gatewarmup \
     --overwrite
 echo "[run_libero_finetune] $(date) Cosmos run exited with code $?"
