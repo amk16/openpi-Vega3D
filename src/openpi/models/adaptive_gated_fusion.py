@@ -59,16 +59,21 @@ class AdaptiveGatedFusion(nnx.Module):
 
         if self.force_gate is not None:
             g = jnp.full((*f_gen.shape[:-1], 1), self.force_gate, dtype=f_gen.dtype)
+            g_mean = jnp.array(self.force_gate, dtype=jnp.float32)
         else:
             concat = jnp.concatenate([self.ln_gen(f_gen), self.ln_sem(f_sem)], axis=-1)
-            g = jax.nn.sigmoid(self.gate_proj(concat))
+            logit = self.gate_proj(concat)
+            g = jax.nn.sigmoid(logit)
+            # Compute mean in float32 to avoid bf16 saturation (sigmoid(>6) rounds to 1.0 in bf16).
+            g_f32 = jax.nn.sigmoid(logit.astype(jnp.float32))
             if self.gate_clamp is not None:
                 lo = self.gate_clamp
                 g = lo + (1.0 - 2.0 * lo) * g
+                g_f32 = lo + (1.0 - 2.0 * lo) * g_f32
             if self.gate_warmup_steps is not None and step is not None:
                 warmup = self.gate_warmup_steps
                 peak_step = warmup / 2.0
-                # Phase 1 (0 → peak): cosine-anneal forced value from start → 0.5
+                # Phase 1 (0 -> peak): cosine-anneal forced value from start -> 0.5
                 t1 = jnp.clip(step / peak_step, 0.0, 1.0)
                 forced = self.gate_warmup_start + (self.gate_warmup_target - self.gate_warmup_start) * 0.5 * (1.0 - jnp.cos(jnp.pi * t1))
                 # Phase 2 (peak → end): cosine-anneal from forced 0.5 → learned
@@ -78,5 +83,7 @@ class AdaptiveGatedFusion(nnx.Module):
                 effective_lerp = jnp.where(in_phase1, 1.0, lerp)
                 effective_forced = jnp.where(in_phase1, forced, self.gate_warmup_target)
                 g = effective_lerp * effective_forced + (1.0 - effective_lerp) * g
+                g_f32 = effective_lerp * effective_forced + (1.0 - effective_lerp) * g_f32
+            g_mean = jnp.mean(g_f32)
 
-        return (1.0 - g) * f_gen + g * f_sem, jnp.mean(g)
+        return (1.0 - g) * f_gen + g * f_sem, g_mean

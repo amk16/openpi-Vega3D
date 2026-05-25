@@ -168,14 +168,28 @@ def list_completed_episodes_s3(bucket: str, prefix: str, cameras) -> set[int]:
     return set.intersection(*per_cam.values())
 
 
-def flush_to_s3(local_root: pathlib.Path, bucket: str, prefix: str) -> None:
-    """Upload everything under local_root to S3, then delete local feature
-    files to free disk. Raises (keeping local files) if the upload fails."""
+def flush_to_s3(
+    local_root: pathlib.Path,
+    bucket: str,
+    prefix: str,
+    *,
+    keep_local: bool = False,
+) -> None:
+    """Upload everything under local_root to S3.
+
+    By default also deletes local feature files after upload to free disk.
+    Pass `keep_local=True` to retain local files (e.g. so a subsequent
+    training run can read them without re-downloading). Raises if the
+    upload fails -- local files are kept on error regardless of flag.
+    """
     dest = f"s3://{bucket}/{prefix}"
     print(f"[precompute] Uploading {local_root} -> {dest} ...")
     # `aws s3 sync` uploads only new/changed files; no --delete, so episodes
     # already in S3 (and since deleted locally) are left untouched.
     subprocess.run(["aws", "s3", "sync", str(local_root), dest], check=True)
+    if keep_local:
+        print("[precompute] Upload OK; keeping local files (--keep_local_after_upload)")
+        return
     freed = 0
     for p in local_root.rglob("ep_*.safetensors"):
         freed += p.stat().st_size
@@ -219,6 +233,11 @@ def main() -> None:
                              "idx so different settings produce different caches.")
     parser.add_argument("--flush_every_episodes", type=int, default=25,
                         help="Upload to S3 and free local disk every N episodes.")
+    parser.add_argument("--keep_local_after_upload", action="store_true", default=False,
+                        help="Keep local feature files after S3 upload instead of deleting "
+                             "them. Useful when a downstream training run on the same machine "
+                             "needs the cache on disk -- skips the round-trip through S3. "
+                             "WARNING: full LIBERO Cosmos cache is ~534 GiB; ensure free disk.")
     parser.add_argument("--window", type=int, default=None,
                         help="Temporal window size (frames per WAN clip). For each training frame f, "
                              "features come from frames [f - stride*(W-1) ... f], clamped at episode "
@@ -443,12 +462,14 @@ def main() -> None:
 
         since_flush += 1
         if use_s3 and since_flush >= args.flush_every_episodes:
-            flush_to_s3(cache_root, args.s3_bucket, s3_prefix)
+            flush_to_s3(cache_root, args.s3_bucket, s3_prefix,
+                        keep_local=args.keep_local_after_upload)
             since_flush = 0
 
     # Final flush for the trailing partial batch of episodes.
     if use_s3 and since_flush > 0:
-        flush_to_s3(cache_root, args.s3_bucket, s3_prefix)
+        flush_to_s3(cache_root, args.s3_bucket, s3_prefix,
+                    keep_local=args.keep_local_after_upload)
 
     dest = f"s3://{args.s3_bucket}/{s3_prefix}" if use_s3 else str(cache_root)
     print(f"[precompute] Done. Features at {dest}")
