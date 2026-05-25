@@ -1204,7 +1204,7 @@ _CONFIGS = [
                 "feat_block_idx": 20,
             },
             vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
-            vega3d_tower_feat_dim=1536,
+            vega3d_tower_feat_dim=2048,
             vega3d_build_tower=False,
             vega3d_gate_warmup_steps=4000,
             vega3d_gate_warmup_start=1.0,
