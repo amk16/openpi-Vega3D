@@ -1791,6 +1791,8 @@ _CONFIGS = [
             vega3d_tower_feat_dim=2048,
             vega3d_live_tower_for_inference=False,
             vega3d_skip_tower_construction=True,
+            vega3d_gate_warmup_steps=6000,
+            vega3d_use_p_sem=False,
         ),
         data=LeRobotLiberoVegaDataConfig(
             repo_id="physical-intelligence/libero",
