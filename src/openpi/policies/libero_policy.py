@@ -85,6 +85,8 @@ class LiberoInputs(transforms.DataTransformFn):
         # config); this transform otherwise builds a fresh dict and drops them.
         if "tower_features" in data:
             inputs["tower_features"] = data["tower_features"]
+        if "tower_text_embed" in data:
+            inputs["tower_text_embed"] = data["tower_text_embed"]
 
         return inputs
 

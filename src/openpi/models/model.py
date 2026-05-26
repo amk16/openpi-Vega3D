@@ -102,6 +102,12 @@ class Observation(Generic[ArrayT]):
     # token count for that stream and d is the tower's feat_dim. Optional; only
     # consumed when `use_vega3d` is set in the model config.
     tower_features: dict[str, at.Float[ArrayT, "*b n d"]] | None = None
+    # Precomputed text-encoder embedding for the live spatial tower's cross-attention
+    # (Cosmos uses T5-11B). Shape [*b, tl, te]. Only used at inference when the live
+    # tower is built; training reads pre-conditioned features from `tower_features`.
+    # Axis names `tl`/`te` are deliberately distinct from `l` (paligemma prompt
+    # length) to avoid jaxtyping cross-field unification.
+    tower_text_embed: at.Float[ArrayT, "*b tl te"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -139,6 +145,7 @@ class Observation(Generic[ArrayT]):
             proprio_visibility_mask=data.get("proprio_visibility_mask"),
             task_id=data.get("task_id"),
             tower_features=data.get("tower_features"),
+            tower_text_embed=data.get("tower_text_embed"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -234,6 +241,7 @@ def preprocess_observation(
         proprio_visibility_mask=observation.proprio_visibility_mask,
         task_id=observation.task_id,
         tower_features=observation.tower_features,
+        tower_text_embed=observation.tower_text_embed,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,

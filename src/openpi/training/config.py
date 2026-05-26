@@ -422,6 +422,13 @@ class LeRobotLiberoVegaDataConfig(LeRobotLiberoDataConfig):
     tower_features_cache_dir: str = ""
     tower_features_cameras: tuple[str, ...] = ("base_0_rgb",)
 
+    # Path to T5 prompt embedding cache (from export_cosmos_prompt_embeddings.py).
+    # Only used at inference when the live Cosmos tower is built — the precomputed
+    # `tower_features` already have the text conditioning baked in for training.
+    # Required for any config whose features were generated with --prompt_cache;
+    # without it, the live tower runs with null text and produces OOD features.
+    prompt_embeddings_path: str = ""
+
     # Temporal window for WAN feature extraction during precompute. window=1 is
     # the paper-faithful per-frame extraction (matches VEGA-3D's published code).
     # window>1 bundles the recent N frames as ONE WAN clip per training frame so
@@ -462,12 +469,19 @@ class LeRobotLiberoVegaDataConfig(LeRobotLiberoDataConfig):
             ]
         )
 
+        prompt_emb_inputs: list = []
+        if self.prompt_embeddings_path:
+            prompt_emb_inputs.append(
+                _transforms.LoadCosmosPromptEmbedding(cache_path=self.prompt_embeddings_path)
+            )
+
         data_transforms = _transforms.Group(
             inputs=[
                 _transforms.LoadPrecomputedTowerFeatures(
                     cache_dir=self.tower_features_cache_dir,
                     cameras=self.tower_features_cameras,
                 ),
+                *prompt_emb_inputs,
                 libero_policy.LiberoInputs(model_type=model_config.model_type),
             ],
             outputs=[libero_policy.LiberoOutputs()],
@@ -1196,7 +1210,7 @@ _CONFIGS = [
             use_knowledge_insulation=False,
             use_fast_auxiliary=False,
             use_vega3d=True,
-            vega3d_tower_name="wan_t2v",
+            vega3d_tower_name="cosmos_base",
             vega3d_tower_kwargs={
                 "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Cosmos-Predict2.5-2B",
                 "output_spatial": 16,
@@ -1221,6 +1235,7 @@ _CONFIGS = [
             ),
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            prompt_embeddings_path="/workspace/openpi-Vega3D/src/openpi_vega3d/towers/cosmos_prompt_embeddings.pt",
             tower_window=1,
             tower_stride=1,
         ),
@@ -1683,6 +1698,7 @@ _CONFIGS = [
             ),
             tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_base_16x2048_w1s1_blk20",
             tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            prompt_embeddings_path="/workspace/openpi-Vega3D/src/openpi_vega3d/towers/cosmos_prompt_embeddings.pt",
             tower_window=1,
             tower_stride=1,
         ),

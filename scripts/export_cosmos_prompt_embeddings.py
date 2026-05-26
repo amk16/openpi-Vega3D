@@ -59,12 +59,22 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--repo_id", type=str, help="LeRobot dataset repo ID to extract prompts from.")
     group.add_argument("--prompts", nargs="+", type=str, help="Explicit list of prompts to encode.")
+    group.add_argument("--prompts_file", type=str, help="Path to a text file with one prompt per line.")
     parser.add_argument("--out_path", default=str(DEFAULT_OUT), help="Output cache path.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
     args = parser.parse_args()
 
-    prompts = args.prompts if args.prompts else get_prompts_from_dataset(args.repo_id)
+    if args.prompts:
+        prompts = args.prompts
+    elif args.prompts_file:
+        prompts = [
+            line.strip()
+            for line in pathlib.Path(args.prompts_file).read_text().splitlines()
+            if line.strip()
+        ]
+    else:
+        prompts = get_prompts_from_dataset(args.repo_id)
     print(f"[export] {len(prompts)} unique prompts to encode")
     for i, p in enumerate(prompts):
         print(f"  [{i}] {p!r}")

@@ -209,7 +209,7 @@ class Pi0(_model.BaseModel):
         f_sem = self.P_sem(semantic_tokens) if self.P_sem is not None else semantic_tokens
         return self.fusion(f_gen, f_sem, step=step)
 
-    def _run_torch_tower_host(self, raw_image_nhwc):
+    def _run_torch_tower_host(self, raw_image_nhwc, text_embed=None):
         """Host-side trampoline for jax.pure_callback.
 
         Receives a numpy NHWC float image (materialized JAX array), runs the
@@ -226,12 +226,19 @@ class Pi0(_model.BaseModel):
         img_np = _np.transpose(img_np, (0, 3, 1, 2))  # NHWC -> NCHW
         device = next(self.spatial_tower.parameters()).device
         img_t = _torch.from_numpy(_np.ascontiguousarray(img_np)).to(device)
+        text_t = None
+        if text_embed is not None:
+            text_np = _np.asarray(text_embed)
+            text_t = _torch.from_numpy(_np.ascontiguousarray(text_np)).to(device)
         with _torch.inference_mode():
-            feats = self.spatial_tower.encode(img_t)
+            feats = self.spatial_tower.encode(img_t, text_embed=text_t)
         return feats.detach().to(_torch.float32).cpu().numpy()
 
     def _live_tower_features(
-        self, raw_image: at.Array, num_tokens: int
+        self,
+        raw_image: at.Array,
+        num_tokens: int,
+        text_embed: at.Array | None = None,
     ) -> at.Array:
         """Run the torch spatial tower from inside a JIT'd JAX call.
 
@@ -243,10 +250,18 @@ class Pi0(_model.BaseModel):
         out_shape = jax.ShapeDtypeStruct(
             (batch, num_tokens, self._tower_feat_dim), jnp.float32
         )
+        if text_embed is None:
+            return jax.pure_callback(
+                self._run_torch_tower_host,
+                out_shape,
+                raw_image,
+                vmap_method="sequential",
+            )
         return jax.pure_callback(
             self._run_torch_tower_host,
             out_shape,
             raw_image,
+            text_embed,
             vmap_method="sequential",
         )
 
@@ -279,7 +294,9 @@ class Pi0(_model.BaseModel):
                             "(set vega3d_build_tower=True for eval)."
                         )
                     gen_feats = self._live_tower_features(
-                        obs.images[name], image_tokens.shape[1]
+                        obs.images[name],
+                        image_tokens.shape[1],
+                        text_embed=obs.tower_text_embed,
                     )
                 image_tokens, gate_mean = self._fuse_camera(gen_feats, image_tokens, step=step)
                 gate_means.append(gate_mean)

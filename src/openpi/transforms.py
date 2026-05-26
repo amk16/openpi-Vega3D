@@ -403,6 +403,43 @@ class LoadPrecomputedTowerFeatures(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class LoadCosmosPromptEmbedding(DataTransformFn):
+    """Look up the T5 prompt embedding for the current task and attach it
+    as ``tower_text_embed`` so the live Cosmos tower can cross-attend on it.
+
+    No-op when ``tower_features`` is already present (training path: features
+    were precomputed with text conditioning baked in, so we save the bandwidth)
+    or when ``prompt`` is missing. The cache file is loaded lazily on first
+    use so this transform can be safely instantiated in training contexts
+    where the cache file doesn't exist locally. Errors loudly if the prompt
+    isn't in the cache at inference time — that means we're about to fall
+    back to null text and produce OOD features, which we want to surface.
+    """
+
+    cache_path: str
+
+    def _get_cache(self):
+        cache = self.__dict__.get("_cache")
+        if cache is None:
+            from openpi_vega3d.towers.prompt_cache import PromptEmbeddingCache
+
+            cache = PromptEmbeddingCache(self.cache_path)
+            object.__setattr__(self, "_cache", cache)
+        return cache
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "tower_features" in data or "prompt" not in data:
+            return data
+        import torch
+
+        prompt = data["prompt"]
+        if not isinstance(prompt, str):
+            prompt = prompt.item() if hasattr(prompt, "item") else str(prompt)
+        embed = self._get_cache()[prompt].to(dtype=torch.float32).numpy()
+        return {**data, "tower_text_embed": embed}
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 
