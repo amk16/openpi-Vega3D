@@ -5,6 +5,7 @@ ckpts/
 data/
 outputs/
 wandb/
+vastai/libero-data/
 
 # Model weight files (defensive — catches stray weights outside ckpts/).
 *.pt
