@@ -42,9 +42,11 @@ import argparse
 import json
 import os
 import pathlib
+import queue
 import re
 import subprocess
 import sys
+import threading
 
 import numpy as np
 import safetensors.torch
@@ -68,6 +70,7 @@ LIBERO_CAMERA_TO_DATASET_KEY = {
 
 HF_WAN_REPO = "Wan-AI/Wan2.1-T2V-1.3B"
 HF_COSMOS_REPO = "nvidia/Cosmos-Predict2.5-2B"
+HF_COSMOS_POLICY_LIBERO_REPO = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
 EP_FILE_RE = re.compile(r"ep_(\d+)\.safetensors$")
 
 
@@ -117,6 +120,37 @@ def ensure_cosmos_base_checkpoint(checkpoint_dir: str) -> None:
         f"  3. Move the .pt file to {checkpoint_dir}/ (top level)\n"
         "  4. Place Cosmos VAE in <checkpoint_dir>/vae/ or set $COSMOS_VAE_DIR\n"
         "     (same VAE as DreamDojo — can symlink from DreamDojo-2B/vae/)"
+    )
+
+
+def ensure_cosmos_libero_checkpoint(checkpoint_dir: str) -> None:
+    """Check that a Cosmos LIBERO (Robot/Policy) .pt checkpoint exists."""
+    if os.path.isdir(checkpoint_dir) and any(f.endswith(".pt") for f in os.listdir(checkpoint_dir)):
+        return
+    raise FileNotFoundError(
+        f"Cosmos LIBERO checkpoint not found at {checkpoint_dir}. To prepare it:\n"
+        f"  1. Accept the license at https://huggingface.co/{HF_COSMOS_REPO}\n"
+        "  2. Download the Robot/Policy/Libero checkpoint:\n"
+        f"     huggingface-cli download {HF_COSMOS_REPO} robot/policy/libero/model.pt "
+        f"--local-dir {checkpoint_dir}\n"
+        f"  3. Move model.pt to {checkpoint_dir}/ (top level)\n"
+        "  4. Place Cosmos VAE (AutoencoderKLWan, diffusers format) in\n"
+        f"     {checkpoint_dir}/vae/ or set $COSMOS_VAE_DIR"
+    )
+
+
+def ensure_cosmos_policy_libero_checkpoint(checkpoint_dir: str) -> None:
+    """Check that a Cosmos-Policy-LIBERO .pt checkpoint exists."""
+    if os.path.isdir(checkpoint_dir) and any(f.endswith(".pt") for f in os.listdir(checkpoint_dir)):
+        return
+    raise FileNotFoundError(
+        f"Cosmos-Policy-LIBERO checkpoint not found at {checkpoint_dir}. To prepare it:\n"
+        f"  1. Accept the license at https://huggingface.co/{HF_COSMOS_POLICY_LIBERO_REPO}\n"
+        f"  2. huggingface-cli download {HF_COSMOS_POLICY_LIBERO_REPO} "
+        f"--local-dir {checkpoint_dir}\n"
+        f"  3. Copy the .pt to {checkpoint_dir}/model.pt\n"
+        "  4. Place Cosmos VAE (AutoencoderKLWan, diffusers format) in\n"
+        f"     {checkpoint_dir}/vae/ or set $COSMOS_VAE_DIR"
     )
 
 
@@ -197,6 +231,135 @@ def flush_to_s3(
     print(f"[precompute] Upload OK; freed {freed / 1e9:.1f} GB of local disk")
 
 
+def _prefetch_iter(iterable, maxsize: int = 3):
+    """Wrap an iterable with a background-thread prefetch queue."""
+    q: queue.Queue = queue.Queue(maxsize=maxsize)
+    _sentinel = object()
+
+    def _produce():
+        try:
+            for item in iterable:
+                q.put(item)
+        finally:
+            q.put(_sentinel)
+
+    t = threading.Thread(target=_produce, daemon=True)
+    t.start()
+    while True:
+        item = q.get()
+        if item is _sentinel:
+            break
+        yield item
+    t.join()
+
+
+def _generate_batches(
+    todo, episode_indices_arr, dataset, cameras, cameras_list,
+    batch_size, window, stride, image_resolution, ep_to_text_embed,
+):
+    """Yield pre-loaded batch dicts (all tensors on CPU) for the GPU loop."""
+    cpu = torch.device("cpu")
+    for ep in todo:
+        frame_indices = np.where(episode_indices_arr == ep)[0].tolist()
+        n_frames = len(frame_indices)
+        ep_text_embed = ep_to_text_embed.get(ep)
+
+        batch_starts = list(range(0, n_frames, batch_size))
+        for bi, batch_start_pos in enumerate(batch_starts):
+            batch_positions = list(range(
+                batch_start_pos, min(batch_start_pos + batch_size, n_frames),
+            ))
+            bs = len(batch_positions)
+
+            text_embed = None
+            if ep_text_embed is not None:
+                text_embed = ep_text_embed.unsqueeze(0).expand(bs, -1, -1)
+
+            window_positions_per_item = [
+                build_window_positions(p, window, stride) for p in batch_positions
+            ]
+            unique_positions = sorted({pos for wp in window_positions_per_item for pos in wp})
+            prepared_by_pos: dict[int, dict[str, torch.Tensor]] = {}
+            for pos in unique_positions:
+                item = dataset[frame_indices[pos]]
+                prepared_by_pos[pos] = {
+                    cam: prepare_image(
+                        item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], cpu, image_resolution,
+                    ).squeeze(0)
+                    for cam in cameras
+                }
+
+            clips_per_cam = {}
+            seeds_per_cam = {}
+            for cam in cameras:
+                clip_list = [
+                    torch.stack([prepared_by_pos[pos][cam] for pos in wp], dim=0)
+                    for wp in window_positions_per_item
+                ]
+                clips_per_cam[cam] = torch.stack(clip_list, dim=0)
+                cam_idx = cameras_list.index(cam)
+                seeds_per_cam[cam] = (
+                    int(ep) * 1_000_003 + int(batch_start_pos) * 17 + cam_idx
+                ) % (2**31 - 1)
+
+            yield {
+                "ep": ep,
+                "n_frames": n_frames,
+                "is_last": bi == len(batch_starts) - 1,
+                "clips_per_cam": clips_per_cam,
+                "text_embed": text_embed,
+                "seeds_per_cam": seeds_per_cam,
+            }
+
+
+def _generate_policy_batches(
+    todo, episode_indices_arr, dataset, cameras, batch_size,
+    image_resolution, ep_to_text_embed,
+):
+    """Yield batches for policy tower: both cameras + proprio per frame."""
+    cpu = torch.device("cpu")
+    wrist_key = LIBERO_CAMERA_TO_DATASET_KEY["left_wrist_0_rgb"]
+    primary_key = LIBERO_CAMERA_TO_DATASET_KEY["base_0_rgb"]
+    for ep in todo:
+        frame_indices = np.where(episode_indices_arr == ep)[0].tolist()
+        n_frames = len(frame_indices)
+        ep_text_embed = ep_to_text_embed.get(ep)
+
+        batch_starts = list(range(0, n_frames, batch_size))
+        for bi, batch_start_pos in enumerate(batch_starts):
+            batch_positions = list(range(
+                batch_start_pos, min(batch_start_pos + batch_size, n_frames),
+            ))
+            bs = len(batch_positions)
+
+            text_embed = None
+            if ep_text_embed is not None:
+                text_embed = ep_text_embed.unsqueeze(0).expand(bs, -1, -1)
+
+            wrist_imgs = []
+            primary_imgs = []
+            for pos in batch_positions:
+                item = dataset[frame_indices[pos]]
+                wrist_imgs.append(
+                    prepare_image(item[wrist_key], cpu, image_resolution).squeeze(0)
+                )
+                primary_imgs.append(
+                    prepare_image(item[primary_key], cpu, image_resolution).squeeze(0)
+                )
+
+            seed = (int(ep) * 1_000_003 + int(batch_start_pos) * 17) % (2**31 - 1)
+
+            yield {
+                "ep": ep,
+                "n_frames": n_frames,
+                "is_last": bi == len(batch_starts) - 1,
+                "wrist_imgs": torch.stack(wrist_imgs, dim=0),
+                "primary_imgs": torch.stack(primary_imgs, dim=0),
+                "text_embed": text_embed,
+                "seed": seed,
+            }
+
+
 def build_window_positions(p: int, window: int, stride: int) -> list[int]:
     """Causal window of within-episode positions ending at `p`.
 
@@ -226,6 +389,12 @@ def main() -> None:
                         help="Override cameras to precompute (default: config.model.vega3d_cameras).")
     parser.add_argument("--limit_episodes", type=int, default=None,
                         help="Process at most this many episodes (for smoke-testing).")
+    parser.add_argument("--start_episode", type=int, default=None,
+                        help="Start from this episode index (inclusive). For multi-GPU: split "
+                             "the episode list across processes.")
+    parser.add_argument("--end_episode", type=int, default=None,
+                        help="Stop before this episode index (exclusive). Combine with "
+                             "--start_episode to shard across GPUs.")
     parser.add_argument("--s3_bucket", default="behavior-challenge",
                         help="S3 bucket for upload + resume. Empty string disables S3 (local-only).")
     parser.add_argument("--s3_prefix", default=None,
@@ -288,6 +457,10 @@ def main() -> None:
         ensure_dreamdojo_checkpoint(tower_kwargs["checkpoint_dir"])
     elif tower_name == "cosmos_base":
         ensure_cosmos_base_checkpoint(tower_kwargs["checkpoint_dir"])
+    elif tower_name == "cosmos_libero":
+        ensure_cosmos_libero_checkpoint(tower_kwargs["checkpoint_dir"])
+    elif tower_name == "cosmos_policy_libero":
+        ensure_cosmos_policy_libero_checkpoint(tower_kwargs["checkpoint_dir"])
 
     # Resolve image resolution for prepare_image(). DreamDojo/Cosmos use 256x256
     # internally; feeding that directly avoids a redundant 224→256 resize.
@@ -299,11 +472,16 @@ def main() -> None:
     tower = TOWER_REGISTRY[tower_name](**tower_kwargs).to(args.device).eval()
     device = torch.device(args.device)
 
-    # Probe via the same code path we'll use for real (encode_window_batch
-    # subsumes single-frame: window=1 makes it equivalent to per-frame encode).
+    is_policy_tower = tower_name == "cosmos_policy_libero"
+
+    # Probe via the same code path we'll use for real.
     with torch.no_grad():
-        probe_clips = torch.zeros(1, max(window, 1), 3, image_resolution, image_resolution, device=device)
-        sample = tower.encode_window_batch(probe_clips, noise_seed=0)
+        if is_policy_tower:
+            probe_img = torch.zeros(1, 3, image_resolution, image_resolution, device=device)
+            sample, _ = tower.encode_policy_batch(probe_img, probe_img, proprio=None, noise_seed=0)
+        else:
+            probe_clips = torch.zeros(1, max(window, 1), 3, image_resolution, image_resolution, device=device)
+            sample = tower.encode_window_batch(probe_clips, noise_seed=0)
     feat_dim = int(sample.shape[-1])
     num_tokens = int(sample.shape[1])
     output_spatial = tower_kwargs["output_spatial"]
@@ -323,6 +501,10 @@ def main() -> None:
     dataset = LeRobotDataset(config.data.repo_id)
     episode_indices_arr = np.asarray(dataset.hf_dataset["episode_index"])
     unique_eps = np.unique(episode_indices_arr).tolist()
+    if args.start_episode is not None:
+        unique_eps = [ep for ep in unique_eps if ep >= args.start_episode]
+    if args.end_episode is not None:
+        unique_eps = [ep for ep in unique_eps if ep < args.end_episode]
     if args.limit_episodes is not None:
         unique_eps = unique_eps[: args.limit_episodes]
 
@@ -398,73 +580,97 @@ def main() -> None:
     }
     (cache_root / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 
-    # embed -> upload -> delete loop.
+    # embed -> upload -> delete loop, with background data prefetch.
     since_flush = 0
     cameras_list = list(cameras)
-    for ep in tqdm.tqdm(todo, desc="episodes"):
-        frame_indices = np.where(episode_indices_arr == ep)[0].tolist()
-        n_frames_in_ep = len(frame_indices)
+
+    if is_policy_tower:
+        # Policy tower: process both cameras jointly via encode_policy_batch.
+        batch_gen = _generate_policy_batches(
+            todo, episode_indices_arr, dataset, cameras, args.batch_size,
+            image_resolution, ep_to_text_embed,
+        )
         per_cam_features: dict[str, list[torch.Tensor]] = {cam: [] for cam in cameras}
+        ep_bar = tqdm.tqdm(total=len(todo), desc="episodes")
 
-        # Per-episode text embedding (same for every frame in the episode).
-        ep_text_embed = ep_to_text_embed.get(ep)  # None if no prompt cache
+        for batch in _prefetch_iter(batch_gen, maxsize=3):
+            ep = batch["ep"]
+            text_embed = batch["text_embed"].to(device) if batch["text_embed"] is not None else None
+            wrist_imgs = batch["wrist_imgs"].to(device)
+            primary_imgs = batch["primary_imgs"].to(device)
 
-        for batch_start_pos in range(0, n_frames_in_ep, args.batch_size):
-            batch_positions = list(
-                range(batch_start_pos, min(batch_start_pos + args.batch_size, n_frames_in_ep))
-            )
-            actual_batch_size = len(batch_positions)
+            with torch.no_grad():
+                wrist_feats, primary_feats = tower.encode_policy_batch(
+                    wrist_imgs, primary_imgs, proprio=None,
+                    text_embed=text_embed, noise_seed=batch["seed"],
+                )
+            per_cam_features["left_wrist_0_rgb"].append(wrist_feats.detach().to(torch.bfloat16).cpu())
+            per_cam_features["base_0_rgb"].append(primary_feats.detach().to(torch.bfloat16).cpu())
 
-            # Expand text embed to batch: [seq_len, dim] -> [B, seq_len, dim]
-            batch_text_embed = None
-            if ep_text_embed is not None:
-                batch_text_embed = ep_text_embed.unsqueeze(0).expand(actual_batch_size, -1, -1).to(device)
+            if batch["is_last"]:
+                n_frames = batch["n_frames"]
+                for cam in cameras:
+                    cat = torch.cat(per_cam_features[cam], dim=0).contiguous()
+                    assert cat.shape[0] == n_frames, (
+                        f"Frame count mismatch for ep {ep} cam {cam}: {cat.shape[0]} vs {n_frames}"
+                    )
+                    out_path = cache_root / cam / f"ep_{ep:06d}.safetensors"
+                    tmp_path = out_path.with_suffix(".safetensors.tmp")
+                    safetensors.torch.save_file({"features": cat}, str(tmp_path))
+                    tmp_path.rename(out_path)
+                per_cam_features = {cam: [] for cam in cameras}
+                ep_bar.update(1)
 
-            # Build causal windows for each training frame in the batch.
-            window_positions_per_item = [
-                build_window_positions(p, window, stride) for p in batch_positions
-            ]
-            # Dedupe: many training frames share window positions (especially
-            # with large W or small stride). Load + prepare each unique position
-            # at most once per batch, then assemble clips by lookup.
-            unique_positions = sorted({pos for wp in window_positions_per_item for pos in wp})
-            prepared_by_pos: dict[int, dict[str, torch.Tensor]] = {}
-            for pos in unique_positions:
-                item = dataset[frame_indices[pos]]
-                prepared_by_pos[pos] = {
-                    cam: prepare_image(item[LIBERO_CAMERA_TO_DATASET_KEY[cam]], device, image_resolution).squeeze(0)
-                    # squeeze: prepare_image returns [1, 3, R, R]; clip stacking wants [3, R, R]
-                    for cam in cameras
-                }
-            # Build [B, T, 3, 224, 224] per camera, then encode.
+                since_flush += 1
+                if use_s3 and since_flush >= args.flush_every_episodes:
+                    flush_to_s3(cache_root, args.s3_bucket, s3_prefix,
+                                keep_local=args.keep_local_after_upload)
+                    since_flush = 0
+
+        ep_bar.close()
+
+    else:
+        # Standard tower: process cameras independently.
+        batch_gen = _generate_batches(
+            todo, episode_indices_arr, dataset, cameras, cameras_list,
+            args.batch_size, window, stride, image_resolution, ep_to_text_embed,
+        )
+        per_cam_features = {cam: [] for cam in cameras}
+        ep_bar = tqdm.tqdm(total=len(todo), desc="episodes")
+
+        for batch in _prefetch_iter(batch_gen, maxsize=3):
+            ep = batch["ep"]
+            text_embed = batch["text_embed"].to(device) if batch["text_embed"] is not None else None
+
             for cam in cameras:
-                clip_list = []
-                for wp in window_positions_per_item:
-                    clip_list.append(torch.stack([prepared_by_pos[pos][cam] for pos in wp], dim=0))
-                clips = torch.stack(clip_list, dim=0)  # [B, T, 3, 224, 224]
-                # Deterministic noise seed per (episode, batch_start, camera).
-                # Stable across re-runs of precompute -> reproducible cache.
-                cam_idx = cameras_list.index(cam)
-                seed = (int(ep) * 1_000_003 + int(batch_start_pos) * 17 + cam_idx) % (2**31 - 1)
+                clips = batch["clips_per_cam"][cam].to(device)
                 with torch.no_grad():
-                    feats = tower.encode_window_batch(clips, noise_seed=seed, text_embed=batch_text_embed)
+                    feats = tower.encode_window_batch(
+                        clips, noise_seed=batch["seeds_per_cam"][cam], text_embed=text_embed,
+                    )
                 per_cam_features[cam].append(feats.detach().to(torch.bfloat16).cpu())
 
-        for cam in cameras:
-            cat = torch.cat(per_cam_features[cam], dim=0).contiguous()
-            assert cat.shape[0] == n_frames_in_ep, (
-                f"Frame count mismatch for ep {ep} cam {cam}: {cat.shape[0]} vs {n_frames_in_ep}"
-            )
-            out_path = cache_root / cam / f"ep_{ep:06d}.safetensors"
-            tmp_path = out_path.with_suffix(".safetensors.tmp")
-            safetensors.torch.save_file({"features": cat}, str(tmp_path))
-            tmp_path.rename(out_path)
+            if batch["is_last"]:
+                n_frames = batch["n_frames"]
+                for cam in cameras:
+                    cat = torch.cat(per_cam_features[cam], dim=0).contiguous()
+                    assert cat.shape[0] == n_frames, (
+                        f"Frame count mismatch for ep {ep} cam {cam}: {cat.shape[0]} vs {n_frames}"
+                    )
+                    out_path = cache_root / cam / f"ep_{ep:06d}.safetensors"
+                    tmp_path = out_path.with_suffix(".safetensors.tmp")
+                    safetensors.torch.save_file({"features": cat}, str(tmp_path))
+                    tmp_path.rename(out_path)
+                per_cam_features = {cam: [] for cam in cameras}
+                ep_bar.update(1)
 
-        since_flush += 1
-        if use_s3 and since_flush >= args.flush_every_episodes:
-            flush_to_s3(cache_root, args.s3_bucket, s3_prefix,
-                        keep_local=args.keep_local_after_upload)
-            since_flush = 0
+                since_flush += 1
+                if use_s3 and since_flush >= args.flush_every_episodes:
+                    flush_to_s3(cache_root, args.s3_bucket, s3_prefix,
+                                keep_local=args.keep_local_after_upload)
+                    since_flush = 0
+
+        ep_bar.close()
 
     # Final flush for the trailing partial batch of episodes.
     if use_s3 and since_flush > 0:

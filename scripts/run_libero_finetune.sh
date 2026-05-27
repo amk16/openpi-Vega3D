@@ -1,55 +1,24 @@
 #!/usr/bin/env bash
 #
-# Overnight LIBERO finetune. Runs three independent experiments sequentially:
-#   1. pi05_libero_lora_wan_precomp          -- pi05 LoRA + VEGA-3D WAN tower
-#   2. pi05_libero_lora                      -- plain pi05 LoRA baseline (no VEGA)
-#   3. pi05_libero_lora_wan_precomp_semonly  -- VEGA architecture, WAN gated off
-# 1 vs 2 = end-to-end value of WAN; 1 vs 3 = clean WAN isolation; 2 vs 3 =
-# cost/benefit of the extra P_sem projection. All three stream checkpoints to
-# S3 and log a held-out validation loss. A failed run does not stop the next.
+# LIBERO finetune with Cosmos-Policy-LIBERO tower features.
 
-# ---- Download dataset + precomputed WAN tower features (must succeed) ----
+# ---- Download dataset + precomputed tower features (must succeed) ----
 set -eo pipefail
 NVME_DIR=/workspace
 HF_HOME="$NVME_DIR/.hf_home"
 aws s3 sync s3://behavior-challenge/lerobot/ "$HF_HOME/lerobot/"
 
-# Sync into the base tower_features/ dir: the S3 keys already carry the
-# physical-intelligence_libero/wan_t2v_16x1536/<camera>/... suffix, which must
-# match tower_features_cache_dir in the pi05_libero_lora_wan_precomp config.
-# aws s3 sync \
-#     s3://behavior-challenge/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20 \
-#     /workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20
+aws s3 sync \
+    s3://behavior-challenge/tower_features/physical-intelligence_libero/cosmos_policy_libero_16x2048_w1s1_blk20_t5cond \
+    /workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/cosmos_policy_libero_16x2048_w1s1_blk20_t5cond
 
 # Past this point a failed training run must not abort the script.
 set +e
 source /venv/main/bin/activate
 
-echo "[run_libero_finetune] $(date) starting Cosmos FFT run"
+echo "[run_libero_finetune] $(date) starting Cosmos-Policy-LIBERO FFT run"
 OPENBLAS_NUM_THREADS=1 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-    pi05_libero_fft_cosmos_precomp_gatewarmup \
-    --exp-name=fft_cosmos_precomp_gatewarmup \
+    pi05_libero_fft_cosmos_policy_libero_precomp \
+    --exp-name=fft_cosmos_policy_libero_precomp \
     --overwrite
-echo "[run_libero_finetune] $(date) Cosmos run exited with code $?"
-
-# # ---- Run 2: WAN-tower variant (precomputed features) ----
-# echo "[run_libero_finetune] $(date) starting WAN baseline run"
-# OPENBLAS_NUM_THREADS=1 HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-#     pi05_libero_fft \
-#     --exp-name=libero_fft \
-#     --overwrite
-# echo "[run_libero_finetune] $(date) WAN run exited with code $?"
-
-# # # ---- Run 3: WAN ablation control (VEGA architecture, WAN gated off) ----
-# # echo "[run_libero_finetune] $(date) starting WAN-control run (pi05_libero_lora_wan_precomp_semonly)"
-# # HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-# #     pi05_libero_lora_wan_precomp_semonly \
-# #     --exp-name=wan_precomp_semonly_v1_w1s1_blk20_NO_INIT_BIAS \
-# #     --overwrite
-# # echo "[run_libero_finetune] $(date) WAN-control run exited with code $?"
-
-# echo "[run_libero_finetune] $(date) starting WAN gate warmup run (pi05_libero_deeplora)"
-# HF_HOME=$HF_HOME XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py \
-#     pi05_libero_deeplora_wan_precomp_gatewarmup \
-#     --exp-name=libero_deeplora_wan_precomp_gatewarmup \
-#     --overwrite
+echo "[run_libero_finetune] $(date) Cosmos-Policy-LIBERO run exited with code $?"

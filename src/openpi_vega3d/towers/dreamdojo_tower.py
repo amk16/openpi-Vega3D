@@ -381,6 +381,162 @@ class DreamDojoTower(BaseTower):
             return pooled
 
     # ------------------------------------------------------------------
+    # Policy encode (multi-camera + proprio, Cosmos-Policy-LIBERO)
+    # ------------------------------------------------------------------
+
+    def encode_policy_batch(
+        self,
+        wrist_images: Tensor,
+        primary_images: Tensor,
+        proprio: Tensor | None,
+        text_embed: Tensor | None = None,
+        noise_seed: int | None = None,
+        num_duplicates: int = 4,
+    ) -> tuple[Tensor, Tensor]:
+        """Extract features from a Cosmos Policy model with multi-frame latent sequence.
+
+        Builds a 4-slot latent sequence [blank, proprio, wrist, primary],
+        matching the conditioning layout of Cosmos-Policy-LIBERO. Both
+        cameras are processed jointly in one DiT forward pass, and per-camera
+        features are sliced from the corresponding temporal positions.
+
+        Args:
+            wrist_images:   [B, 3, H, W] wrist camera images.
+            primary_images: [B, 3, H, W] primary/base camera images.
+            proprio:        [B, proprio_dim] normalized proprioceptive state,
+                            or None to use zeros (mean-proprio placeholder).
+            text_embed:     [B, seq_len, 1024] precomputed T5 prompt embedding.
+            noise_seed:     Deterministic noise seed for reproducibility.
+            num_duplicates: Frames per slot for VAE temporal compression (default 4).
+
+        Returns:
+            (wrist_features, primary_features) each [B, output_spatial², feat_dim].
+        """
+        b = wrist_images.shape[0]
+
+        if not self.online:
+            dummy = torch.zeros(
+                b, self._output_spatial**2, self._feat_dim,
+                dtype=wrist_images.dtype, device=wrist_images.device,
+            )
+            return dummy, dummy.clone()
+
+        pt_dtype = _DTYPE_MAP[self._dtype_str]
+        device = wrist_images.device
+
+        with torch.inference_mode():
+            # --- Prepare images: resize to input_resolution, normalize to [-1, 1] ---
+            def _prep(imgs):
+                imgs = imgs.to(dtype=pt_dtype)
+                if imgs.shape[-2] != self._input_resolution or imgs.shape[-1] != self._input_resolution:
+                    imgs = F.interpolate(
+                        imgs, size=(self._input_resolution, self._input_resolution),
+                        mode="bilinear", align_corners=False,
+                    )
+                return to_neg_one_to_one(imgs)
+
+            wrist = _prep(wrist_images)    # [B, 3, R, R]
+            primary = _prep(primary_images)  # [B, 3, R, R]
+
+            # --- Build raw video: [B, 3, T_raw, R, R] with 4 slots × num_duplicates ---
+            # Slot 0: blank (zeros), Slot 1: blank (proprio injected in latent),
+            # Slot 2: wrist, Slot 3: primary
+            R = self._input_resolution
+            blank_frame = wrist.new_zeros(b, 3, R, R)
+            # Duplicate each slot num_duplicates times so VAE temporal compression
+            # (4×) maps each slot to exactly 1 latent frame
+            raw_frames = []
+            for _ in range(num_duplicates):
+                raw_frames.append(blank_frame)         # slot 0: blank
+            for _ in range(num_duplicates):
+                raw_frames.append(blank_frame)         # slot 1: blank (proprio goes in latent)
+            for _ in range(num_duplicates):
+                raw_frames.append(wrist)               # slot 2: wrist cam
+            for _ in range(num_duplicates):
+                raw_frames.append(primary)              # slot 3: primary cam
+            # [B, 3, T_raw, R, R]
+            x_video = torch.stack(raw_frames, dim=2).to(dtype=pt_dtype)
+
+            # --- VAE encode ---
+            latents = self.vae.encode(x_video).latent_dist.mode()  # [B, 16, T_lat, H', W']
+            t_lat = latents.shape[2]
+            lat_h, lat_w = latents.shape[-2], latents.shape[-1]
+
+            # --- Inject proprio into latent frame 1 via tiling ---
+            if proprio is not None:
+                proprio = proprio.to(device=device, dtype=pt_dtype)
+            else:
+                # Use zeros (= mean proprio after normalization)
+                proprio_dim = 9  # Cosmos-Policy-LIBERO uses 9-dim proprio
+                proprio = latents.new_zeros(b, proprio_dim)
+            latent_elements = latents.shape[1] * lat_h * lat_w  # 16 * H' * W'
+            flat_p = proprio.reshape(b, -1)
+            n_rep = (latent_elements + flat_p.shape[1] - 1) // flat_p.shape[1]
+            tiled = flat_p.repeat(1, n_rep)[:, :latent_elements]
+            latents[:, :, 1, :, :] = tiled.reshape(b, latents.shape[1], lat_h, lat_w)
+
+            # --- Condition mask: all frames are conditioning (= 1) ---
+            # We use ones because all 4 slots are observed input, not prediction targets.
+            # Noise is added for flow-matching feature extraction, not for denoising.
+            cond_mask = latents.new_ones(b, 1, t_lat, lat_h, lat_w)
+            hidden_states = torch.cat([latents, cond_mask], dim=1)  # [B, 17, T_lat, H', W']
+
+            # --- Flow-matching noise ---
+            if noise_seed is not None:
+                gen = torch.Generator(device=device).manual_seed(noise_seed)
+                noise = torch.randn(hidden_states.shape, generator=gen, device=device, dtype=hidden_states.dtype)
+            else:
+                noise = torch.randn_like(hidden_states)
+            scheduler = self._get_scheduler(device)
+            tau = self._nearest_timestep(scheduler)
+            noisy = scheduler.scale_noise(hidden_states, tau.expand(b), noise)
+
+            # --- Text conditioning ---
+            if text_embed is not None:
+                text_embed = text_embed.to(device=device, dtype=pt_dtype)
+            else:
+                text_embed = noisy.new_zeros(b, 1, _COSMOS_2B_CONFIG["text_embed_dim"])
+
+            padding_mask = noisy.new_ones(1, 1, lat_h, lat_w)
+
+            # --- DiT forward with feature hook ---
+            feat_holder: dict[str, Tensor] = {}
+
+            def _hook(_module, _input, output):
+                feat_holder["feat"] = output.detach()
+
+            block = self.transformer.transformer_blocks[self._feat_block_idx]
+            handle = block.register_forward_hook(_hook)
+            try:
+                self.transformer(
+                    hidden_states=noisy,
+                    timestep=torch.full((b,), self._timestep, device=device, dtype=torch.long),
+                    encoder_hidden_states=text_embed,
+                    padding_mask=padding_mask,
+                )
+            finally:
+                handle.remove()
+
+            feats = feat_holder["feat"]  # [B, T_lat * grid_h * grid_w, feat_dim]
+
+            # --- Extract per-camera features from temporal slots ---
+            p_h, p_w = _COSMOS_2B_CONFIG["patch_size"][1], _COSMOS_2B_CONFIG["patch_size"][2]
+            grid_h, grid_w = lat_h // p_h, lat_w // p_w
+            tokens_per_frame = grid_h * grid_w
+
+            feats = feats.view(b, t_lat, grid_h, grid_w, feats.shape[-1])
+            # Slot 2 = wrist, Slot 3 = primary
+            wrist_feat = feats[:, 2]    # [B, grid_h, grid_w, feat_dim]
+            primary_feat = feats[:, 3]  # [B, grid_h, grid_w, feat_dim]
+
+            def _pool(f):
+                f = f.permute(0, 3, 1, 2).contiguous()  # [B, feat_dim, grid_h, grid_w]
+                f = F.adaptive_avg_pool2d(f, output_size=(self._output_spatial, self._output_spatial))
+                return f.permute(0, 2, 3, 1).reshape(b, self._output_spatial**2, -1).contiguous()
+
+            return _pool(wrist_feat), _pool(primary_feat)
+
+    # ------------------------------------------------------------------
     # Scheduler helpers
     # ------------------------------------------------------------------
 
