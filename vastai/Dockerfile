@@ -62,13 +62,6 @@ RUN git clone https://github.com/Zxy-MLlab/LIBERO-PRO.git /opt/libero-pro
 COPY vastai/libero-data/bddl_files/ /opt/libero-pro/libero/libero/bddl_files/
 COPY vastai/libero-data/init_files/ /opt/libero-pro/libero/libero/init_files/
 
-# LIBERO-Pro _env suites expect e.g. init_files/libero_spatial_env/ but the
-# downloaded data only has libero_spatial/. Symlink to fix the mismatch.
-RUN for base in spatial object goal 10; do \
-      ln -sfn libero_${base} /opt/libero-pro/libero/libero/init_files/libero_${base}_env && \
-      ln -sfn libero_${base} /opt/libero-pro/libero/libero/bddl_files/libero_${base}_env; \
-    done
-
 # Install LIBERO-Pro deps + package
 COPY examples/libero/requirements.txt /tmp/requirements-libero.txt
 RUN /venv/libero/bin/pip3 install --no-cache-dir -r /tmp/requirements-libero.txt --extra-index-url https://download.pytorch.org/whl/cu113
