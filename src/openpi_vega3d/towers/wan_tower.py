@@ -76,7 +76,7 @@ class WanT2VTower(BaseTower):
     def feat_dim(self) -> int:
         return self._feat_dim
 
-    def encode(self, images: Tensor) -> Tensor:
+    def encode(self, images: Tensor, *, text_embed: Tensor | None = None) -> Tensor:
         feats = self.encoder(images)
         assert feats.ndim == 4, f"Expected [B,C,H,W] from encoder, got {tuple(feats.shape)}"
         b, c, h, w = feats.shape
@@ -86,6 +86,8 @@ class WanT2VTower(BaseTower):
         self,
         clips: Tensor,
         noise_seed: int | None = None,
+        *,
+        text_embed: Tensor | None = None,
     ) -> Tensor:
         """Multi-frame encode: one clip per batch item; returns last-latent-slot
         spatial tokens. See `WanT2VOnlineEncoder._forward_window_batch`.
