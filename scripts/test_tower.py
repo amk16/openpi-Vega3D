@@ -13,6 +13,9 @@ Usage:
         --prompt_emb path/to/wan_prompt_embedding.pt
 """
 
+# ruff: noqa: PLC0415 — heavy imports (torch, towers) are deferred into the
+# functions so --offline mode and pytest collection stay import-light.
+
 import argparse
 import sys
 
@@ -120,10 +123,8 @@ def test_offline():
     import logging
 
     logging.basicConfig(level=logging.WARNING)
-    from openpi_vega3d.towers.diagnostics import (
-        log_tower_registry_keys,
-        run_base_tower_contract_smoke,
-    )
+    from openpi_vega3d.towers.diagnostics import log_tower_registry_keys
+    from openpi_vega3d.towers.diagnostics import run_base_tower_contract_smoke
 
     log_tower_registry_keys()
     run_base_tower_contract_smoke(device="cpu")
@@ -171,6 +172,107 @@ def test_tower(tower_name, checkpoint, prompt_emb=None):
     assert result["frozen"] is True, "Tower should be frozen"
 
     print(f"\nTOWER TEST {tower_name}: PASSED")
+
+
+# Not a pytest test (CLI helper taking args); without this, pytest collection
+# errors on the missing 'tower_name' fixture.
+test_tower.__test__ = False
+
+
+# ---------------------------------------------------------------------------
+# Phase 8.5 — pytest tests for the Break-1 fix (content-region pooling).
+# Test 1 is CI-safe: pure tensor math against letterbox_content_box() plus a
+# standalone slice-and-pool, no WAN checkpoint. The full-encoder variant is
+# behind `-m manual` for the remote.
+# ---------------------------------------------------------------------------
+
+try:
+    import pytest
+
+    _manual_mark = pytest.mark.manual
+except ImportError:  # CLI use in an env without pytest
+
+    def _manual_mark(f):
+        return f
+
+
+def test_pillarbox_content_pooling_geometry():
+    """Phase 8.5 test 1: content slice excludes every pad token; pooled
+    quadrant geometry maps correctly to the 16x16 grid."""
+    import torch
+    import torch.nn.functional as F  # noqa: N812 — torch convention
+
+    from openpi_vega3d.towers.common import letterbox_content_box
+
+    # Exact box for the LIBERO headline case (224^2 -> 832x480, 16 px/token):
+    # pillarbox is exactly 11 tokens per side -> 30x30 content at cols 11:41.
+    assert letterbox_content_box(224, 224, 480, 832, 16) == (0, 30, 11, 41)
+    # Input aspect == canvas aspect -> no pad, full grid.
+    assert letterbox_content_box(480, 832, 480, 832, 16) == (0, 30, 0, 52)
+
+    # Standalone slice-and-pool, mirroring the encoder's
+    # _slice_content_region + adaptive_avg_pool2d (without a checkpoint).
+    pad_value = -7.0
+    grid = torch.full((1, 4, 30, 52), pad_value)  # [B, C, grid_h, grid_w]
+    top, bottom, left, right = letterbox_content_box(224, 224, 480, 832, 16)
+    grid[..., top:bottom, left:right] = 1.0
+    # Bright top-left quadrant of the CONTENT region (rows 0:15, content cols 11:26).
+    grid[..., 0:15, 11:26] = 10.0
+
+    # Legacy behavior (the break): pooling the full canvas leaks pad into the
+    # outer output columns.
+    legacy = F.adaptive_avg_pool2d(grid, (16, 16))
+    assert legacy.min() < 0, "sanity: legacy full-canvas pooling must be pad-contaminated"
+
+    # Fixed behavior: slice first -> zero pad contribution to any pooled token.
+    sliced = grid[..., top:bottom, left:right]
+    assert sliced.shape[-2:] == (30, 30)
+    assert (sliced != pad_value).all(), "content slice must exclude every pad token"
+    fixed = F.adaptive_avg_pool2d(sliced, (16, 16))
+    assert fixed.min() > 0, "no pad value may reach any pooled token"
+
+    # Quadrant geometry: bright top-left half of the content must land in the
+    # top-left 8x8 of the 16x16 output, and only there.
+    top_left = fixed[..., :8, :8].mean()
+    bottom_right = fixed[..., 8:, 8:].mean()
+    assert top_left > 8.0, f"bright quadrant should pool to ~10, got {top_left}"
+    assert bottom_right < 2.0, f"dark quadrant should pool to ~1, got {bottom_right}"
+
+    # No output column may be systematically pad-dominated.
+    assert (fixed.amin(dim=(0, 1, 2)) > 0).all(), "every output column must be pad-free"
+
+
+@_manual_mark
+def test_pillarbox_content_pooling_full_encoder():
+    """Phase 8.5 test 1, full-encoder variant (remote; requires WAN checkpoint).
+
+    Run: WAN_T2V_CKPT_DIR=... uv run pytest scripts/test_tower.py -m manual
+    """
+    import os
+
+    import pytest
+    import torch
+
+    ckpt = os.environ.get("WAN_T2V_CKPT_DIR")
+    if not ckpt or not os.path.isdir(ckpt):
+        pytest.skip("WAN_T2V_CKPT_DIR not set / not a directory (remote-only test)")
+
+    from openpi_vega3d.towers import TOWER_REGISTRY
+
+    tower = TOWER_REGISTRY["wan_t2v"](checkpoint_dir=ckpt, output_spatial=16, content_region_pool=True)
+    if torch.cuda.is_available():
+        tower = tower.to("cuda")
+    images = torch.rand(1, 3, 224, 224).to(next(tower.parameters()).device)
+    feats = tower.encode(images)
+    assert feats.shape[1] == 256, f"expected 256 tokens, got {feats.shape}"
+    # Column-energy flatness: with the content slice active there are no pure
+    # black-bar columns, so no column should be an extreme outlier.
+    g = feats.float().reshape(1, 16, 16, -1).norm(dim=-1)  # [1, H, W]
+    col = g.mean(dim=(0, 1))
+    edge = torch.cat([col[:3], col[-3:]]).mean()
+    middle = col[5:11].mean()
+    ratio = (edge / middle).item()
+    assert 0.5 < ratio < 2.0, f"edge/middle column energy ratio {ratio:.3f} suggests pad tokens leaked"
 
 
 def main():
