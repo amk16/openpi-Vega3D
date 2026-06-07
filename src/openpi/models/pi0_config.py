@@ -87,6 +87,12 @@ class Pi0Config(_model.BaseModelConfig):
     # Eq. 8 blends raw; the published numbers come from the code). False =
     # legacy raw blend, bit-identical to the published-run behavior.
     vega3d_blend_normed: bool = False
+    # Phase 8.3 (Break-2b fix): P_gen as a 2-layer GELU MLP (mlp2x_gelu,
+    # Linear(feat_dim→D_llm) → GELU → Linear(D_llm→D_llm)) — VEGA deploys
+    # mlp2x_gelu on the generative stream; a single Linear is below the
+    # demonstrated capacity floor for mapping DiT residuals (LLaVA-1.5, REPA).
+    # False = legacy single Linear, bit-identical.
+    vega3d_p_gen_mlp: bool = False
     # Include a learned P_sem(2048→2048) projection on the semantic stream
     # before fusion. False = feed SigLIP tokens directly as f_sem.
     vega3d_use_p_sem: bool = True

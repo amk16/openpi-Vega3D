@@ -17,6 +17,24 @@ from openpi.shared import array_typing as at
 logger = logging.getLogger("openpi")
 
 
+class MLP2xGELU(nnx.Module):
+    """mlp2x_gelu projector — VEGA's deployed generative-projector shape
+    (Phase 8.3, Break-2b fix): Linear(in→out) → GELU → Linear(out→out).
+
+    GELU is exact (approximate=False) to match torch's nn.GELU() default —
+    required for JAX↔torch fusion parity. Param paths nest under the owning
+    attribute (e.g. P_gen/fc1/kernel), which the weight-loader backfill regex
+    `(P_gen|...)/.*` already covers.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, *, rngs: nnx.Rngs):
+        self.fc1 = nnx.Linear(in_dim, out_dim, rngs=rngs)
+        self.fc2 = nnx.Linear(out_dim, out_dim, rngs=rngs)
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.fc2(jax.nn.gelu(self.fc1(x), approximate=False))
+
+
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
 
@@ -138,7 +156,12 @@ class Pi0(_model.BaseModel):
         if self.use_vega3d:
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             feat_dim = config.vega3d_tower_feat_dim
-            self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
+            # Phase 8.3 (Break-2b fix): mlp2x_gelu projector when flagged;
+            # legacy single Linear (bit-identical) otherwise.
+            if config.vega3d_p_gen_mlp:
+                self.P_gen = MLP2xGELU(feat_dim, hidden, rngs=rngs)
+            else:
+                self.P_gen = nnx.Linear(feat_dim, hidden, rngs=rngs)
             if config.vega3d_use_p_sem:
                 self.P_sem = nnx.Linear(hidden, hidden, rngs=rngs)
                 if config.vega3d_identity_init_p_sem:

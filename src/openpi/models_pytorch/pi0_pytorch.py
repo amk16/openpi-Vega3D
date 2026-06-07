@@ -141,7 +141,16 @@ class PI0Pytorch(nn.Module):
                 feat_dim = self.spatial_tower.feat_dim
 
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
-            self.P_gen = nn.Linear(feat_dim, hidden)
+            # Phase 8.3 (Break-2b fix): mlp2x_gelu projector when flagged —
+            # exact VEGA deployed shape (their multimodal_projector/builder.py
+            # uses nn.Sequential for mlp2x_gelu). Legacy single Linear otherwise.
+            # nn.GELU() default is exact GELU, matching the JAX MLP2xGELU twin.
+            if getattr(config, "vega3d_p_gen_mlp", False):
+                self.P_gen = nn.Sequential(
+                    nn.Linear(feat_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden)
+                )
+            else:
+                self.P_gen = nn.Linear(feat_dim, hidden)
             self.P_sem = nn.Linear(hidden, hidden)
             self.fusion = AdaptiveGatedFusion(
                 hidden,
