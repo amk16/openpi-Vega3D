@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .common import resize_letterbox_pad, resolve_inference_dtype, split_frames, to_neg_one_to_one
+from .common import letterbox_content_box, resize_letterbox_pad, resolve_inference_dtype, split_frames, to_neg_one_to_one
 from .rollout_tower_log import log_tower
 from .wan.configs import WAN_CONFIGS, SIZE_CONFIGS
 from .wan.modules.model import WanModel
@@ -41,6 +41,14 @@ class WanT2VOnlineEncoder(nn.Module):
         self.shift = float(getattr(config, "generative_vision_tower_shift", getattr(config, "generative_encoder_shift", 5.0)))
         self.feat_block_idx = int(getattr(config, "generative_vision_tower_feat_block_idx", getattr(config, "generative_encoder_feat_block_idx", -1)))
         self.output_spatial = int(getattr(config, "generative_vision_tower_output_spatial", 14))
+        # Break-1 fix (Phase 8.1): pool the output grid from the letterbox
+        # CONTENT region only, excluding pure-pad (black-bar) tokens, so token
+        # i of the pooled grid covers the same image fraction as SigLIP token i.
+        # Off by default: existing caches were built with full-canvas pooling
+        # and must stay reproducible.
+        self.content_region_pool = bool(
+            getattr(config, "generative_vision_tower_content_region_pool", False)
+        )
         self.prompt_emb_path = str(
             getattr(
                 config,
@@ -123,6 +131,28 @@ class WanT2VOnlineEncoder(nn.Module):
         x = resize_letterbox_pad(x, self.frame_height, self.frame_width, pad_value=-1.0)
         return x.to(dtype=self.param_dtype)
 
+    def _slice_content_region(self, feats: torch.Tensor, in_h: int, in_w: int) -> torch.Tensor:
+        """Crop [B, C, grid_h, grid_w] token features to the letterbox content
+        region (Break-1 fix), so the subsequent adaptive pool never averages
+        pure-pad (black-bar) tokens into the output grid.
+
+        The box comes from `letterbox_content_box`, which mirrors
+        `resize_letterbox_pad`'s geometry exactly — for LIBERO's square 224^2
+        frames on the 832x480 canvas this is the exact 30x30 content square
+        (token cols 11:41). Used identically by BOTH forward paths; this is
+        not eval-path unification (Break 3, deferred).
+        """
+        px_h = self.vae_stride[1] * self.patch_size[1]
+        px_w = self.vae_stride[2] * self.patch_size[2]
+        if px_h != px_w:
+            raise ValueError(
+                f"content_region_pool assumes square tokens, got {px_h}x{px_w} px/token."
+            )
+        top, bottom, left, right = letterbox_content_box(
+            in_h, in_w, self.frame_height, self.frame_width, px_h
+        )
+        return feats[:, :, top:bottom, left:right]
+
     def _get_text_context(self, device: torch.device, batch_size: int):
         context = self.prompt_context.to(device=device, non_blocking=True)
         if torch.is_floating_point(context):
@@ -162,6 +192,7 @@ class WanT2VOnlineEncoder(nn.Module):
         if frames.shape[0] == 0:
             return frames.new_zeros((0, getattr(self.cfg, "dim", 1280), self.output_spatial, self.output_spatial))
 
+        in_h, in_w = int(frames.shape[-2]), int(frames.shape[-1])  # pre-letterbox size, for content_region_pool
         x = self._prepare_frames(frames)
         frame_list = [x[i].unsqueeze(1) for i in range(x.shape[0])]  # [3, 1, H, W]
 
@@ -221,6 +252,8 @@ class WanT2VOnlineEncoder(nn.Module):
                 )
 
             feats = feats.view(feats.shape[0], grid_h, grid_w, feats.shape[2]).permute(0, 3, 1, 2).contiguous()
+            if self.content_region_pool:
+                feats = self._slice_content_region(feats, in_h, in_w)
             feats = F.adaptive_avg_pool2d(feats, output_size=(self.output_spatial, self.output_spatial))
             # Release large temporaries early to reduce peak memory.
             del latent_batch, noisy_latents, noisy_latents_list, noise
@@ -341,6 +374,8 @@ class WanT2VOnlineEncoder(nn.Module):
             last_slot = feats[:, -1]  # [B, grid_h, grid_w, C] — causal summary @ current frame
             # Pool spatially to match SigLIP's 16×16 grid downstream.
             last_slot = last_slot.permute(0, 3, 1, 2).contiguous()  # [B, C, grid_h, grid_w]
+            if self.content_region_pool:
+                last_slot = self._slice_content_region(last_slot, h_in, w_in)
             pooled = F.adaptive_avg_pool2d(
                 last_slot, output_size=(self.output_spatial, self.output_spatial)
             )

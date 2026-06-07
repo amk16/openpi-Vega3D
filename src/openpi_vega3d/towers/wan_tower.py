@@ -35,6 +35,7 @@ class WanT2VTower(BaseTower):
         feat_block_idx: int = -1,
         output_spatial: int = 14,
         dtype: str = "bf16",
+        content_region_pool: bool = False,
     ):
         super().__init__()
 
@@ -47,6 +48,7 @@ class WanT2VTower(BaseTower):
             "generative_vision_tower_feat_block_idx": feat_block_idx,
             "generative_vision_tower_output_spatial": output_spatial,
             "generative_vision_tower_dtype": dtype,
+            "generative_vision_tower_content_region_pool": content_region_pool,
         }
         if prompt_emb_path is not None:
             config_kwargs["generative_vision_tower_prompt_emb_path"] = prompt_emb_path

@@ -79,7 +79,7 @@ def run_column_energy(args: argparse.Namespace) -> None:
             f"[meta] tower={meta.get('tower_name')} window={meta.get('window')} "
             f"stride={meta.get('stride')} blk={meta.get('feat_block_idx')} "
             f"output_spatial={meta.get('output_spatial')} "
-            f"content_region_pool={meta.get('tower_kwargs', {}).get('content_region_pool', False)}"
+            f"content_region_pool={meta.get('content_region_pool', meta.get('tower_kwargs', {}).get('content_region_pool', False))}"
         )
         grid = int(meta.get("output_spatial", grid))
     else:

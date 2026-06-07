@@ -359,7 +359,11 @@ def main() -> None:
     repo_sanitized = config.data.repo_id.replace("/", "_")
     feat_block_idx = int(tower_kwargs.get("feat_block_idx", -1))
     text_tag = "_t5cond" if args.prompt_cache else ""
-    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}_w{window}s{stride}_blk{feat_block_idx}{text_tag}"
+    # content_region_pool changes the meaning of every token (pad excluded from
+    # pooling) — it is a geometry knob and MUST be in the prefix, or a fixed
+    # cache would collide with a legacy one and the regen would silently no-op.
+    cpool_tag = "_cpool" if tower_kwargs.get("content_region_pool") else ""
+    variant_tag = f"{tower_name}_{output_spatial}x{feat_dim}_w{window}s{stride}_blk{feat_block_idx}{text_tag}{cpool_tag}"
     s3_prefix = args.s3_prefix or f"tower_features/{repo_sanitized}/{variant_tag}"
 
     if use_s3:
@@ -395,6 +399,10 @@ def main() -> None:
         "feat_block_idx": feat_block_idx,
         "extraction_mode": "multi_frame_last_slot" if multi_frame else "single_frame",
         "text_conditioned": args.prompt_cache is not None,
+        # Phase 8.1 (Break-1 fix): True means pooling excluded letterbox pad
+        # tokens (content-region pooling). Explicit top-level key — diagnostics
+        # and cache consumers must not have to dig through tower_kwargs.
+        "content_region_pool": bool(tower_kwargs.get("content_region_pool", False)),
     }
     (cache_root / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 

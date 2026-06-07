@@ -2,8 +2,12 @@
 
 set -euo pipefail
 
-# Set the local directory to sync (edit here if needed)
-LOCAL_DIR="tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20"
+# Local directory to sync. Override for non-default caches, e.g. the Phase-8
+# fidelity-fix cache:
+#   LOCAL_DIR=tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20_cpool \
+#       ./scripts/sync_tower_features_to_s3.sh
+# Default preserved = legacy cache (pre-content_region_pool).
+LOCAL_DIR="${LOCAL_DIR:-tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20}"
 
 # S3 bucket base (edit here if bucket or main prefix changes)
 S3_BASE="s3://behavior-challenge"

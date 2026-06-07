@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 from typing import List, Optional
 
 import torch
@@ -95,6 +96,37 @@ def resize_letterbox_pad(
     left = pad_w // 2
     # F.pad pads the last dim first: (left, right, top, bottom).
     return F.pad(x, (left, pad_w - left, top, pad_h - top), mode="constant", value=pad_value)
+
+
+def letterbox_content_box(
+    h_in: int, w_in: int, out_h: int, out_w: int, px_per_token: int
+) -> tuple[int, int, int, int]:
+    """Content region of a letterboxed frame, in token coordinates.
+
+    Mirrors `resize_letterbox_pad`'s geometry exactly (scale=min, centered
+    padding) so the two cannot drift: for the same input/output sizes this
+    returns the token-grid slice that covers every content token and excludes
+    every pure-pad token. Boundaries are expanded outward (floor/ceil), so a
+    token partially covered by content counts as content.
+
+    For the LIBERO headline case (224x224 into 832x480, 16 px/token) the
+    pillarbox is exactly 11 tokens per side, so the box is exact: rows 0:30,
+    cols 11:41 — a clean 30x30 content square with zero partial tokens.
+
+    Returns:
+        (top, bottom, left, right) for slicing `feats[..., top:bottom, left:right]`
+        on a [.., grid_h, grid_w] token grid.
+    """
+    scale = min(out_h / h_in, out_w / w_in)
+    new_h = max(1, round(h_in * scale))
+    new_w = max(1, round(w_in * scale))
+    top_px = max(0, out_h - new_h) // 2
+    left_px = max(0, out_w - new_w) // 2
+    top = top_px // px_per_token
+    left = left_px // px_per_token
+    bottom = math.ceil((top_px + new_h) / px_per_token)
+    right = math.ceil((left_px + new_w) / px_per_token)
+    return top, bottom, left, right
 
 
 def temporal_resample(frames: torch.Tensor, target_frames: int) -> torch.Tensor:
