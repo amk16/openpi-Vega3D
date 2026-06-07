@@ -82,6 +82,11 @@ class Pi0Config(_model.BaseModelConfig):
     vega3d_gate_warmup_steps: int | None = None
     vega3d_gate_warmup_start: float = 1.0
     vega3d_gate_warmup_target: float = 0.5
+    # Phase 8.2 (Break-2a fix): blend the LayerNormed streams in the fusion
+    # instead of the raw ones — matches VEGA's deployed code (their paper
+    # Eq. 8 blends raw; the published numbers come from the code). False =
+    # legacy raw blend, bit-identical to the published-run behavior.
+    vega3d_blend_normed: bool = False
     # Include a learned P_sem(2048→2048) projection on the semantic stream
     # before fusion. False = feed SigLIP tokens directly as f_sem.
     vega3d_use_p_sem: bool = True

@@ -3,13 +3,22 @@
 Per-token sigmoid-gated convex combination of generative and semantic features:
 
     g_i = sigmoid( W_g . Concat( LN(F_gen_i), LN(F_sem_i) ) + b_g )
-    F_fused_i = (1 - g_i) * F_gen_i + g_i * F_sem_i
+
+    blend_normed=False (legacy, paper Eq. 8 verbatim):
+        F_fused_i = (1 - g_i) * F_gen_i + g_i * F_sem_i
+    blend_normed=True (VEGA's deployed feature_fusion.py, Phase 8.2 fix):
+        F_fused_i = (1 - g_i) * LN(F_gen_i) + g_i * LN(F_sem_i)
 
 The gate is a scalar in [0, 1] computed independently for each spatial position.
-LayerNorm on each stream resolves the scale mismatch between generative and
-semantic manifolds. The convex combination (not sum) keeps the fused output in
-the same magnitude range as the inputs, preventing signal amplification that
-would destabilize downstream attention layers.
+
+Provenance note (corrects this docstring's earlier claim that "LayerNorm on
+each stream resolves the scale mismatch"): in the legacy raw blend the LN
+outputs feed ONLY the gate — the blend combines the raw streams, so nothing
+resolves their scale mismatch and the louder stream dominates at any gate
+value. That is paper Eq. 8 verbatim; VEGA's deployed code blends the
+LayerNormed streams instead (and their published numbers come from the code).
+`blend_normed=True` matches the deployed code; False is kept as the
+paper-faithful ablation and the bit-identical legacy behavior.
 """
 
 from __future__ import annotations
@@ -30,6 +39,8 @@ class AdaptiveGatedFusion(nn.Module):
         self,
         hidden_size: int,
         force_gate: float | None = None,
+        *,
+        blend_normed: bool = False,
     ):
         """
         Args:
@@ -37,12 +48,17 @@ class AdaptiveGatedFusion(nn.Module):
             force_gate: If not None, overrides the learned gate with this fixed
                 value in [0, 1] at every position -- used for inference-time
                 ablation (e.g. 1.0 => pure semantic, 0.0 => pure generative).
+            blend_normed: Phase 8.2 (Break-2a fix). If True, blend the
+                LayerNormed streams (VEGA's deployed code); if False (default),
+                blend the raw streams — paper Eq. 8 verbatim, bit-identical
+                legacy behavior.
         """
         super().__init__()
         if force_gate is not None and not 0.0 <= force_gate <= 1.0:
             raise ValueError(f"force_gate must be in [0, 1], got {force_gate}")
         self.hidden_size = hidden_size
         self.force_gate = force_gate
+        self.blend_normed = blend_normed
         self.ln_gen = nn.LayerNorm(hidden_size)
         self.ln_sem = nn.LayerNorm(hidden_size)
         self.gate_proj = nn.Linear(2 * hidden_size, 1)  # W_g and b_g baked in
@@ -57,6 +73,15 @@ class AdaptiveGatedFusion(nn.Module):
                 f"Expected last dim {self.hidden_size}, got {F_gen.shape[-1]}"
             )
 
+        # LN is shared between the gate (always) and the blend (when
+        # blend_normed) — compute it once, and only when something needs it.
+        n_gen = n_sem = None
+        if self.force_gate is None or self.blend_normed:
+            # LayerNorm in fp32 for numerical stability (matches PyTorch default
+            # behavior for LayerNorm under autocast), then cast back.
+            n_gen = self.ln_gen(F_gen)
+            n_sem = self.ln_sem(F_sem)
+
         if self.force_gate is not None:
             g = torch.full(
                 (*F_gen.shape[:-1], 1),
@@ -65,9 +90,9 @@ class AdaptiveGatedFusion(nn.Module):
                 dtype=F_gen.dtype,
             )
         else:
-            # LayerNorm in fp32 for numerical stability (matches PyTorch default
-            # behavior for LayerNorm under autocast), then cast back.
-            concat = torch.cat([self.ln_gen(F_gen), self.ln_sem(F_sem)], dim=-1)
+            concat = torch.cat([n_gen, n_sem], dim=-1)
             g = torch.sigmoid(self.gate_proj(concat))  # [B, N, 1]
 
+        if self.blend_normed:
+            return (1.0 - g) * n_gen + g * n_sem
         return (1.0 - g) * F_gen + g * F_sem

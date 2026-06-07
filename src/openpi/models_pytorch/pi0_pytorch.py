@@ -143,7 +143,11 @@ class PI0Pytorch(nn.Module):
             hidden = paligemma_config.width  # D_llm, 2048 for gemma_2b
             self.P_gen = nn.Linear(feat_dim, hidden)
             self.P_sem = nn.Linear(hidden, hidden)
-            self.fusion = AdaptiveGatedFusion(hidden, force_gate=config.vega3d_force_gate)
+            self.fusion = AdaptiveGatedFusion(
+                hidden,
+                force_gate=config.vega3d_force_gate,
+                blend_normed=getattr(config, "vega3d_blend_normed", False),
+            )
             self._spatial_cameras = tuple(config.vega3d_cameras)
 
             logging.info(
