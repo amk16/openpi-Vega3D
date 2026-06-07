@@ -5,6 +5,68 @@ Newest phase appears first.
 
 ---
 
+## Phase 8: WAN Fusion Fidelity Fixes (2026-06-07)
+
+**Environment note:** developed on a machine without a torch/JAX env (macOS 13, no repo venv). "PASS (local sim)" = the underlying math was validated through a pure-numpy mirror of the exact code path; the pytest itself executes on remote/CI. CI runs `uv run pytest --strict-markers -m "not manual"` on PRs.
+
+### Sub-Phase 8.0 — Diagnostics
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Column-energy math: pillarbox signature detected on the column axis only | reshape orientation + axis order (numpy mirror; planted-pad, axis-swap sentinel, uniform cases) | **PASS (local sim)** |
+| Token-order assumption row-major | encoder's `permute(0,2,3,1).reshape(B,S*S,-1)` byte-read | **PASS (code verified)** |
+| `column-energy` smoke vs synthetic cache | end-to-end script run, signature detection asserted | **pytest: `scripts/diagnose_wan_fidelity_test.py` (CI/remote)** |
+| `norm-ratio` vs real checkpoint | Break-2 mechanism in trained artifacts | **PENDING (remote, Phase 9 before-evidence)** |
+| `column-energy` vs real cache | Break-1 signature in trained cache + cache provenance | **PENDING (remote, Phase 9 before-evidence)** |
+
+### Sub-Phase 8.1 — Content-region pooling
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| `letterbox_content_box` exact cases | LIBERO 224²→(0,30,11,41) 30×30; native-aspect→full grid; partial-token expansion; degenerate inputs | **PASS (local sim, 4/4)** |
+| Slice+pool end-to-end | legacy pad contamination reproduced (output cols 0-3, 12-15 — matches audit pool-bin math); fixed path zero pad leakage, quadrants correct | **PASS (local sim)** |
+| `variant_tag` gets `_cpool` | no S3 prefix collision with legacy cache | **pytest-adjacent: asserted via config round-trip test; full regen check is Phase 9** |
+| Pillarbox geometry pytest | same as local sim, in CI | **pytest: `scripts/test_tower.py::test_pillarbox_content_pooling_geometry` (CI)** |
+| Full-encoder variant | real WAN forward with `content_region_pool=True` | **pytest `-m manual` (remote, needs `WAN_T2V_CKPT_DIR`)** |
+
+### Sub-Phase 8.2 — Normed blend
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Flag-off == legacy formula | bit-level expression identity | **PASS (local sim: array-equal)** + pytest (CI) |
+| ×100 imbalance behavior | legacy cos(out, loud)=0.994 at g≈0.5 (the break); normed balanced + scale-bounded | **PASS (local sim)** + pytest (CI) |
+| Force-gate path with `blend_normed` | LN still reaches the blend | **pytest: `pi0_test.py::test_blend_normed_scale_and_legacy_identity` (CI)** |
+
+### Sub-Phase 8.3 — P_gen MLP
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Loader backfill regex vs nested paths | `P_gen/fc1/*`, `P_gen/fc2/*` all match; unrelated paths don't | **PASS (local: real regex, 6/6)** |
+| Shape contract (B, 256, 2048) + `_merge_params` backfill | output unchanged; base-ckpt load backfills MLP | **pytest: `pi0_test.py::test_p_gen_mlp_shape_and_checkpoint_backfill` (CI)** |
+
+### Sub-Phase 8.4 — Fidelity-fix config
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| Programmatic block diff headline↔fidelityfix | exactly 4 deltas (+name), nothing else | **PASS (local: 7 changed lines)** |
+| Cache-dir name matches `variant_tag` formula | local dir and S3 prefix agree by construction | **PASS (verified by formula)** |
+| Config parse + flag round-trip | all configs parse; fidelityfix round-trips | **pytest: `pi0_test.py::test_legacy_regression_flags_off` (CI)** |
+
+### Sub-Phase 8.5 — Test suite itself
+
+| Test | Validates | Result |
+|------|-----------|--------|
+| JAX↔torch fusion + MLP parity (flag on AND off) | framework twins compute identically (first torch-side coverage) | **pytest: `pi0_test.py::test_fusion_jax_torch_parity` (CI)** |
+| Syntax + ruff on all touched files | zero NEW lint errors vs HEAD baseline (repo is not ruff-clean at HEAD) | **PASS (local)** |
+
+### Follow-ups
+
+- Run the full pytest suite on remote/CI (first branch push) — all "(CI)" rows above
+- 8.0 diagnostics against the real cache + checkpoint on the remote (Phase 9 before-evidence; do BEFORE regen)
+- Known pre-existing, unrelated: `nnx.LayerNorm` eps 1e-6 vs torch 1e-5 (parity test uses high-variance inputs, effect ≪ tolerance)
+
+---
+
 ## Phase 7: DreamDojo Training Setup
 
 ### Sub-Phase 7.0 — Merge origin/main (2026-05-20)

@@ -18,7 +18,8 @@ from .wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 class WanT2VOnlineEncoder(nn.Module):
     """
     Online WAN-T2V feature encoder.
-    Input: [N, 3, H, W], output: [N, Cg, 14, 14].
+    Input: [N, 3, H, W], output: [N, Cg, output_spatial, output_spatial]
+    (default 16, matching PaliGemma's 16x16 SigLIP token grid).
     """
 
     def __init__(self, config):
@@ -40,7 +41,10 @@ class WanT2VOnlineEncoder(nn.Module):
         self.timestep = int(getattr(config, "generative_vision_tower_timestep", getattr(config, "generative_encoder_timestep", 300)))
         self.shift = float(getattr(config, "generative_vision_tower_shift", getattr(config, "generative_encoder_shift", 5.0)))
         self.feat_block_idx = int(getattr(config, "generative_vision_tower_feat_block_idx", getattr(config, "generative_encoder_feat_block_idx", -1)))
-        self.output_spatial = int(getattr(config, "generative_vision_tower_output_spatial", 14))
+        # Default 16 (was 14, inherited from VEGA's CLIP ViT-L/14 grid) — fixes
+        # the CHANGELOG known-issue: downstream fusion needs 16x16=256 tokens
+        # to match PaliGemma's SigLIP grid.
+        self.output_spatial = int(getattr(config, "generative_vision_tower_output_spatial", 16))
         # Break-1 fix (Phase 8.1): pool the output grid from the letterbox
         # CONTENT region only, excluding pure-pad (black-bar) tokens, so token
         # i of the pooled grid covers the same image fraction as SigLIP token i.

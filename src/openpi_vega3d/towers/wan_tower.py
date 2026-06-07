@@ -33,7 +33,7 @@ class WanT2VTower(BaseTower):
         timestep: int = 300,
         shift: float = 5.0,
         feat_block_idx: int = -1,
-        output_spatial: int = 14,
+        output_spatial: int = 16,  # 16x16=256 tokens, matching SigLIP (was 14; CHANGELOG known-issue)
         dtype: str = "bf16",
         content_region_pool: bool = False,
     ):
@@ -60,8 +60,8 @@ class WanT2VTower(BaseTower):
         self._output_spatial = output_spatial
         self.freeze()
         logger.info(
-            "WanT2VTower initialized (checkpoint=%s, task=%s, output=[B, 196, %d])",
-            checkpoint_dir, task, self._feat_dim,
+            "WanT2VTower initialized (checkpoint=%s, task=%s, output=[B, %d, %d])",
+            checkpoint_dir, task, output_spatial * output_spatial, self._feat_dim,
         )
         log_tower(
             "WanT2VTower ready: ckpt=%s task=%s feat_dim=%d prompt_emb=%s dtype=%s",

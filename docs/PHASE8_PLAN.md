@@ -1,7 +1,7 @@
 # Phase 8: WAN Fusion Fidelity Fixes — Full Plan
 
 **Last updated:** 2026-06-07
-**Status:** Planned. No sub-phase started.
+**Status:** IMPLEMENTED (all sub-phases 8.0–8.6, branch `fidelity-fixes`, 2026-06-07). Local verification done (syntax/lint/math simulations); pytest suite + remote diagnostics pending first CI run / remote session — see `docs/TEST_STATUS.md` Phase 8.
 **Provenance:** 2026-06-04/05 fidelity audit (research-wiki: `vega3d-fidelity-audit`, `wan-fusion-fidelity-breaks`). All claims verified at HEAD `747a5c1`; VEGA reference claims byte-verified against raw files fetched from github.com/H-EmbodVis/VEGA-3D. **2026-06-07 pre-implementation review pass:** every code claim in this plan independently re-verified at HEAD; one gap found and folded in (S3 variant-tag collision, see 8.1), test specs hardened (CI-safe geometry test, new JAX↔torch parity test), two out-of-scope findings recorded as known-issues in 8.6 (user declined scope expansion).
 
 ---
@@ -43,13 +43,13 @@ Phase 8 fixes the two confirmed fidelity breaks in the WAN→PaliGemma gated fus
 ## Sub-Phase Status
 
 ```
-8.0  Diagnostic scripts            TODO    scripts/diagnose_wan_fidelity.py (new)
-8.1  Break-1 fix: content pooling  TODO    wan_t2v_encoder.py, common.py, wan_tower.py, precompute_tower_features.py, sync_tower_features_to_s3.sh
-8.2  Break-2a fix: normed blend    TODO    models/adaptive_gated_fusion.py, models_pytorch/adaptive_gated_fusion.py
-8.3  Break-2b fix: P_gen MLP       TODO    pi0.py, pi0_pytorch.py, pi0_config.py
-8.4  Fidelity-fix training config  TODO    src/openpi/training/config.py
-8.5  Tests                          TODO    scripts/test_tower.py, src/openpi/models/pi0_test.py
-8.6  Documentation                  TODO    docs/CHANGELOG.md, docs/TEST_STATUS.md
+8.0  Diagnostic scripts            DONE bf17c1a   scripts/diagnose_wan_fidelity.py (new)
+8.1  Break-1 fix: content pooling  DONE 94e7cab   wan_t2v_encoder.py, common.py, wan_tower.py, precompute_tower_features.py, sync_tower_features_to_s3.sh
+8.2  Break-2a fix: normed blend    DONE ed47cb7   models/adaptive_gated_fusion.py, models_pytorch/adaptive_gated_fusion.py
+8.3  Break-2b fix: P_gen MLP       DONE bb9c059   pi0.py, pi0_pytorch.py, pi0_config.py
+8.4  Fidelity-fix training config  DONE d5baf00   src/openpi/training/config.py
+8.5  Tests                          DONE 105b52e   scripts/test_tower.py, scripts/diagnose_wan_fidelity_test.py, src/openpi/models/pi0_test.py
+8.6  Documentation                  DONE (this commit)  docs/CHANGELOG.md, docs/TEST_STATUS.md, output_spatial 14→16 (WAN files)
 ```
 
 ### Dependency Graph

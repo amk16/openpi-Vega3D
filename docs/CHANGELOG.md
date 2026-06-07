@@ -7,23 +7,103 @@ Newest phase appears first.
 
 ## Known Issues / Tech Debt
 
-### Tower `output_spatial` defaults still 14 (should be 16)
+### Tower `output_spatial` defaults still 14 — PARTIALLY FIXED (Phase 8.6)
 
-**Problem:** Four of five tower classes default `output_spatial=14` (inherited from VEGA-3D's CLIP ViT-L/14 grid). openpi-Vega3D's downstream requires 16×16 = 256 tokens to match PaliGemma's SigLIP output.
+**Problem:** Tower classes defaulted `output_spatial=14` (inherited from VEGA-3D's CLIP ViT-L/14 grid). openpi-Vega3D's downstream requires 16×16 = 256 tokens to match PaliGemma's SigLIP output.
 
-| File | Current Default |
-|------|----------------|
-| `src/openpi_vega3d/towers/vae_online_encoder.py:31` | `14` |
-| `src/openpi_vega3d/towers/wan_t2v_encoder.py:43` | `14` |
-| `src/openpi_vega3d/towers/wan_tower.py:36` | `14` |
-| `src/openpi_vega3d/towers/vae_tower.py:29` | `14` |
-| `src/openpi_vega3d/towers/dreamdojo_tower.py:65` | `16` (correct) |
+| File | Default |
+|------|---------|
+| `src/openpi_vega3d/towers/wan_t2v_encoder.py` | ~~14~~ **16 (fixed, Phase 8.6)** |
+| `src/openpi_vega3d/towers/wan_tower.py` | ~~14~~ **16 (fixed, Phase 8.6)** |
+| `src/openpi_vega3d/towers/vae_online_encoder.py:31` | `14` (still open — VAE towers out of the `fidelity-fixes` branch scope) |
+| `src/openpi_vega3d/towers/vae_tower.py:29` | `14` (still open) |
+| `src/openpi_vega3d/towers/dreamdojo_tower.py:65` | `16` (was already correct) |
 
-**Why it works today:** `policy_utils.py:72` injects `output_spatial=16` at runtime via `setdefault`, overriding tower defaults. So the training/inference path is correct.
+**Why it works today even for the VAE towers:** `policy_utils.py:72` injects `output_spatial=16` at runtime via `setdefault`. Direct instantiation of a VAE tower without it still gets 196 tokens.
 
-**Risk:** Anyone instantiating a tower directly (tests, scripts, notebooks) without going through `policy_utils` gets 14×14 = 196 tokens. Fusion with PaliGemma's 256 tokens would silently misalign or error.
+### Torch Pi0 creates P_sem unconditionally (parity divergence with JAX)
 
-**Fix:** Update defaults from `14` → `16` in the four files above. `dreamdojo_tower.py` already correct. Low risk, high clarity.
+**Problem (found 2026-06-07 Phase-8 review):** `src/openpi/models_pytorch/pi0_pytorch.py` always builds `self.P_sem = nn.Linear(hidden, hidden)` and applies it in fuse — the JAX side respects `vega3d_use_p_sem=False` (the headline configs' setting).
+
+**Why it's not a live break:** serving auto-detects the framework (`policy_config.py:48-54`: torch only when `model.safetensors` exists); the published checkpoints are JAX-trained and eval through the JAX model.
+
+**Fix (deferred per Phase-8 scope lock):** one conditional mirroring the JAX constructor, whenever the torch constructor is next touched. The Phase-8.5 JAX↔torch fusion parity test covers the fusion module itself; this divergence is upstream of it.
+
+---
+
+## Phase 8: WAN Fusion Fidelity Fixes (2026-06-07)
+
+**Goal**: Fix the two confirmed fidelity breaks in the WAN→PaliGemma gated fusion found by the 2026-06-04/05 audit (research-wiki: `vega3d-fidelity-audit`, `wan-fusion-fidelity-breaks`; plan: `docs/PHASE8_PLAN.md`). Both breaks are present in the code behind every published WAN number (FFT+WAN 35.3% vs FFT 42%). Fixes + diagnostics + regen-ready config only — cache regen, the fidelity-fixed run, and the discriminating eval are Phase 9. Branch: `fidelity-fixes` off `747a5c1`. **All fixes are opt-in flags; every existing config is bit-identical with flags off** (published-run reproducibility). Break 3 from the audit (train/eval noise mismatch + duplicated eval path) is explicitly deferred.
+
+### Sub-Phase 8.0 — Diagnostics (2026-06-07)
+
+| File | Change |
+|------|--------|
+| `scripts/diagnose_wan_fidelity.py` | New: `column-energy` (Break-1 signature in a cached feature dir; torch+safetensors only) and `norm-ratio` (‖f_gen‖/‖f_sem‖ at the exact blend operands; full JAX env). Run both against the EXISTING cache/checkpoint before regen — they are the "before" half of Phase 9's comparison. |
+
+### Sub-Phase 8.1 — Break-1 fix: content-region pooling (2026-06-07)
+
+**Break:** a square 224² frame letterboxed onto WAN's 832×480 canvas leaves an exactly-11-token pillarbox per side; the 30×52 token grid was avg-pooled to 16×16 *including the bars* (outer ~3 output columns per side ≈ pure pad) while SigLIP's 16×16 spans the full frame — token-wise fusion combined different image locations.
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/common.py` | New `letterbox_content_box()` — content slice in token coords, computed from the same `scale=min` geometry as `resize_letterbox_pad` (cannot drift). LIBERO case: exact 30×30 box, cols 11:41 |
+| `src/openpi_vega3d/towers/wan_t2v_encoder.py` | `content_region_pool` ctor flag (default **False** = legacy); when set, BOTH forward paths slice the content region before `adaptive_avg_pool2d` |
+| `src/openpi_vega3d/towers/wan_tower.py` | kwarg pass-through |
+| `scripts/precompute_tower_features.py` | `_cpool` marker folded into `variant_tag` when the flag is set (prevents silent S3 prefix collision with the legacy cache — geometry knobs must be in the prefix), `content_region_pool` recorded in `meta.json` |
+| `scripts/sync_tower_features_to_s3.sh` | hardcoded `LOCAL_DIR` now env-overridable |
+
+### Sub-Phase 8.2 — Break-2a fix: normed blend (2026-06-07)
+
+**Break:** LayerNorm fed only the gate; the blend combined RAW streams, so the louder stream dominated at any gate value (a "g=0.5" mix can be effectively 99/1). Provenance: VEGA's paper Eq. 8 blends raw (our port matched the paper); VEGA's deployed `feature_fusion.py` blends the LN'd streams — the published numbers come from the code.
+
+| File | Change |
+|------|--------|
+| `src/openpi/models/adaptive_gated_fusion.py` | `blend_normed` flag (default **False** = legacy raw blend, bit-identical); LN computed once, shared by gate + blend; docstring documents both behaviors |
+| `src/openpi/models_pytorch/adaptive_gated_fusion.py` | same; **docstring corrected** — it claimed "LayerNorm resolves the scale mismatch" while the LN never reached the blend |
+| `src/openpi/models/pi0_config.py` | `vega3d_blend_normed: bool = False` |
+| `src/openpi/models/pi0.py`, `src/openpi/models_pytorch/pi0_pytorch.py` | flag wired into fusion construction |
+
+### Sub-Phase 8.3 — Break-2b fix: P_gen → mlp2x_gelu (2026-06-07)
+
+**Break:** a single `Linear(1536→2048)` is below the demonstrated capacity floor for mapping DiT residuals into token space (LLaVA-1.5: +158 MME from the 1→2-layer upgrade; REPA needed 3 layers; VEGA deploys mlp2x_gelu).
+
+| File | Change |
+|------|--------|
+| `src/openpi/models/pi0.py` | New `MLP2xGELU` (Linear→GELU(exact)→Linear; exact GELU matches torch's default for parity); P_gen built as MLP when flagged. Nested params (`P_gen/fc1/*`, `P_gen/fc2/*`) verified against the weight-loader backfill regex |
+| `src/openpi/models_pytorch/pi0_pytorch.py` | same via `nn.Sequential` (VEGA's own builder shape) |
+| `src/openpi/models/pi0_config.py` | `vega3d_p_gen_mlp: bool = False` |
+
+### Sub-Phase 8.4 — Fidelity-fix training config (2026-06-07)
+
+| File | Change |
+|------|--------|
+| `src/openpi/training/config.py` | `pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix` — clone of the headline config with exactly 4 deltas (verified by programmatic diff): `content_region_pool: True`, `vega3d_blend_normed=True`, `vega3d_p_gen_mlp=True`, cache dir `..._cpool` (**regen required**; name matches precompute's variant_tag) |
+
+### Sub-Phase 8.5 — Tests (2026-06-07)
+
+| File | Change |
+|------|--------|
+| `scripts/test_tower.py` | Pillarbox-geometry test (CI-safe: helper + standalone slice-and-pool, no checkpoint); full-encoder variant behind `-m manual`; `test_tower.__test__=False` (CLI helper was erroring pytest collection) |
+| `scripts/diagnose_wan_fidelity_test.py` | New: column-energy smoke test against a synthetic cache with a planted pillarbox signature |
+| `src/openpi/models/pi0_test.py` | Normed-blend scale (×100 imbalance; flag-off array-equal to the legacy formula), P_gen MLP shape + checkpoint backfill (with loader-regex drift guard), legacy regression (flags off everywhere; fidelityfix round-trips), JAX↔torch fusion + MLP parity flag on AND off (first torch-side coverage) |
+
+### Sub-Phase 8.6 — Documentation + output_spatial flip (2026-06-07)
+
+| File | Change |
+|------|--------|
+| `src/openpi_vega3d/towers/wan_t2v_encoder.py`, `wan_tower.py` | `output_spatial` default 14→16 per the known-issues item above (WAN files only; VAE towers deferred — out of branch scope); stale "14×14"/"196-token" docstrings corrected |
+| `docs/CHANGELOG.md`, `docs/TEST_STATUS.md` | this entry; Phase 8 test tables |
+
+### Key Decisions
+
+1. **All fixes opt-in, legacy defaults preserved.** Existing configs must keep producing features identical to their caches (published-run reproducibility); the fidelityfix config opts in explicitly.
+2. **Content-region pooling, NOT cover-crop or square canvas.** Cover-crop destroys 42.3% of rows for square→16:9 and moves the misregistration to the row axis; square canvases are OOD for the 480P-only WAN 1.3B.
+3. **Raw blend kept behind the flag** — it is VEGA's paper Eq. 8 verbatim (paper and deployed code disagree); documents how the break happened and gives a paper-faithful ablation cell.
+4. **P_sem stays absent** (`vega3d_use_p_sem=False`); PaliGemma's own projector already maps SigLIP tokens — reinstating P_sem is a Phase-9+ ablation.
+5. **Break 3 deferred** (accepted risk: possible second cache regen later). The Phase-9 regen keeps seeded-noise behavior; a `noise-variance` diagnostic subcommand is trivial to add to 8.0's scaffolding if needed.
+
+**Phase 9 (next, outside this phase):** run 8.0 diagnostics against the existing cache (before-evidence) → regen into `_cpool` → train `..._fidelityfix` → eval the 4 swap suites at 50 ep/task. Decision rule: ≤42% → "genuinely not useful" is earned; meaningfully >35.3% → the fidelity story was real.
 
 ---
 
