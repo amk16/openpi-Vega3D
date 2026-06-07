@@ -1202,6 +1202,72 @@ _CONFIGS = [
         ema_decay=0.999,
         num_workers=32,
     ),
+    # Phase 8.4: the headline config + the three fidelity fixes (Breaks 1-2,
+    # research-wiki wan-fusion-fidelity-breaks / docs/PHASE8_PLAN.md). Exactly
+    # four deltas from pi05_libero_fft_wan_precomp_gatewarmup — everything else
+    # (b64, peak 1e-5, 30k steps, gate warmup 4k -> 0.2, cameras, val split)
+    # identical for a clean A/B against the published 35.3%:
+    #   1. content_region_pool=True   (Break 1: pool from the 30x30 content
+    #      region, excluding pillarbox pad tokens)
+    #   2. vega3d_blend_normed=True   (Break 2a: blend the LayerNormed streams)
+    #   3. vega3d_p_gen_mlp=True      (Break 2b: mlp2x_gelu generative projector)
+    #   4. tower_features_cache_dir=..._cpool (fresh cache namespace — REGEN
+    #      REQUIRED; matches precompute's variant_tag for content_region_pool
+    #      caches, so the legacy cache/S3 prefix stays intact as before-evidence)
+    TrainConfig(
+        name="pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b", action_expert_variant="gemma_300m",
+            use_knowledge_insulation=False,
+            use_fast_auxiliary=False,
+            use_vega3d=True,
+            vega3d_tower_name="wan_t2v",
+            vega3d_tower_kwargs={
+                "checkpoint_dir": "/workspace/openpi-Vega3D/ckpts/Wan2.1-T2V-1.3B",
+                "output_spatial": 16,
+                "feat_block_idx": 20,
+                "prompt_emb_path": "/workspace/openpi-Vega3D/src/openpi_vega3d/towers/wan_prompt_embedding_empty_string.pt",
+                "content_region_pool": True,
+            },
+            vega3d_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            vega3d_tower_feat_dim=1536,
+            vega3d_build_tower=False,
+            vega3d_gate_warmup_steps=4000,
+            vega3d_gate_warmup_start=1.0,
+            vega3d_gate_warmup_target=0.2,
+            vega3d_use_p_sem=False,
+            vega3d_blend_normed=True,
+            vega3d_p_gen_mlp=True,
+        ),
+        data=LeRobotLiberoVegaDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi-Vega3D/assets/pi05_libero",
+                asset_id=None,
+            ),
+            tower_features_cache_dir="/workspace/openpi-Vega3D/tower_features/physical-intelligence_libero/wan_t2v_16x1536_w1s1_blk20_cpool",
+            tower_features_cameras=("base_0_rgb", "left_wrist_0_rgb"),
+            tower_window=1,
+            tower_stride=1,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        val_episodes_index=list(range(0, 1693, 20)),
+        s3_checkpoint_bucket="behavior-challenge",
+        ema_decay=0.999,
+        num_workers=32,
+    ),
     TrainConfig(
         name="pi05_libero_fft_wan_precomp_gatewarmup_smallbatch",
         model=pi0_config.Pi0Config(
