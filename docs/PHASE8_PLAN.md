@@ -198,8 +198,12 @@ python scripts/diagnose_wan_fidelity.py norm-ratio \
 python scripts/precompute_tower_features.py pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix \
     --window 1 --s3_bucket behavior-challenge
 
-# Fidelity-fixed training run (Phase 9)
-python scripts/train.py --config pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix
+# Fidelity-fixed training run (Phase 9). NOTE: train.py takes the config name
+# POSITIONALLY (tyro), not via --config; --exp-name is required.
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+    pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix --exp-name=fidelityfix_v1 --overwrite
+
+# Or use the staged runbook: scripts/phase9.sh  (see that file's header)
 ```
 
 **Phase 9 decision rule (the discriminating experiment, for reference):** eval the 4 swap suites at 50 episodes/task. Result ≤ 42% (no better than FFT alone) → "genuinely not useful here" is earned; the paper's §5.3/§6.2 interpretation stands fully. Result meaningfully > 35.3% → the fidelity story was real; revisit the tower verdicts.

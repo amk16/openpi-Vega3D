@@ -25,9 +25,11 @@ Newest phase appears first.
 
 **Problem (found 2026-06-07 Phase-8 review):** `src/openpi/models_pytorch/pi0_pytorch.py` always builds `self.P_sem = nn.Linear(hidden, hidden)` and applies it in fuse — the JAX side respects `vega3d_use_p_sem=False` (the headline configs' setting).
 
-**Why it's not a live break:** serving auto-detects the framework (`policy_config.py:48-54`: torch only when `model.safetensors` exists); the published checkpoints are JAX-trained and eval through the JAX model.
+**Why it's not a live break:** serving auto-detects the framework (`policy_config.py:48-54`: torch only when `model.safetensors` exists); the published checkpoints are JAX-trained and eval through the JAX model. The Phase-9 fidelityfix run also trains in JAX (`scripts/train.py`) and evals through the JAX model, so the torch twin is NOT in the Phase-9 path.
 
-**Fix (deferred per Phase-8 scope lock):** one conditional mirroring the JAX constructor, whenever the torch constructor is next touched. The Phase-8.5 JAX↔torch fusion parity test covers the fusion module itself; this divergence is upstream of it.
+**Newly activated by this diff (noted, still deferred):** the `pi05_libero_fft_wan_precomp_gatewarmup_fidelityfix` config sets `vega3d_use_p_sem=False`. If a fidelityfix JAX checkpoint (no `P_sem` params) is ever served through the **torch** path, its semantic stream gets multiplied by a randomly-initialized `Linear(hidden, hidden)` → silently wrong serving numbers. Harmless for Phase 9 (JAX-only), but a trap for anyone porting a fidelityfix checkpoint to torch serving later.
+
+**Fix (deferred per Phase-8 scope lock):** one conditional mirroring the JAX constructor (`self.P_sem = nn.Linear(...) if config.vega3d_use_p_sem else None`, plus identity-init parity), whenever the torch constructor is next touched. The Phase-8.5 JAX↔torch fusion parity test covers the fusion module itself; this divergence is upstream of it (in `_fuse_camera`/P_sem).
 
 ---
 
